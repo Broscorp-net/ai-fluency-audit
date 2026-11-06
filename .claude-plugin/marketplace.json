@@ -1,0 +1,14 @@
+{
+  "name": "broscorp-tools",
+  "owner": { "name": "Broscorp" },
+  "description": "Внутрішні плагіни Broscorp для Claude Code",
+  "plugins": [
+    {
+      "name": "broscorp-ai-fluency",
+      "source": "./plugins/broscorp-ai-fluency",
+      "description": "Персональний відгук про те, як ви працюєте зі ШІ, за моделлю 4D — із вашої локальної історії Claude Code",
+      "version": "1.0.0",
+      "category": "productivity"
+    }
+  ]
+}

@@ -34,6 +34,7 @@ from core.redact import redact  # noqa: E402
 DIMENSIONS = ("delegation", "description", "discernment", "diligence")
 MIN_RELIABLE = 10  # менше діалогів — оцінка ненадійна
 SHORT_PROMPT = 40  # символів
+RUBRIC_VERSION = 2  # версія references/rubric-4d.md; змінили критерії — підніміть і тут, і в заголовку рубрики
 # Числа з collect, які зберігаються в історії й показуються у звіті (без назв проєктів)
 STAT_KEYS = (
     "sessions", "projects", "exchanges_total", "exchanges_in_sample", "with_tool_actions",
@@ -206,7 +207,8 @@ def cmd_last(_a) -> None:
 
 
 def cmd_history(_a) -> None:
-    _out([{"date": h.get("date"), "overall": h.get("overall"), **h.get("scores", {})} for h in _load_history()])
+    _out([{"date": h.get("date"), "overall": h.get("overall"), "rubric": h.get("rubric", 1), **h.get("scores", {})}
+          for h in _load_history()])
 
 
 def cmd_save(a) -> None:
@@ -239,6 +241,7 @@ def cmd_save(a) -> None:
         "date": when.strftime("%Y-%m-%d %H:%M"),
         "scores": {k: scores[k] for k in DIMENSIONS},
         "overall": round(sum(scores[k] for k in DIMENSIONS) / 4, 1),
+        "rubric": RUBRIC_VERSION,
         "period_days": data.get("period_days"),
         "exchanges": data.get("exchanges"),
         "summary": str(data.get("summary", ""))[:600],
@@ -274,7 +277,8 @@ def cmd_save(a) -> None:
         return
     # Поради з шаблонами промптів ідуть лише у звіт; в історію не пишуться
     recs = [
-        {k: str(r.get(k, ""))[:limit] for k, limit in (("title", 200), ("description", 600), ("example_prompt", 2000))}
+        {k: str(r.get(k, ""))[:limit] for k, limit in (("title", 200), ("description", 600), ("example_prompt", 2000),
+                                                    ("indicator", 120), ("source", 200), ("source_url", 300))}
         for r in data.get("recommendations", []) if isinstance(r, dict)
     ][:5]
     period = f" · {entry['period_days']} днів" if entry["period_days"] else ""

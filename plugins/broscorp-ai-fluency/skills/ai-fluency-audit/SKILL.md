@@ -76,6 +76,9 @@ PY "${CLAUDE_SKILL_DIR}/scripts/fluency.py" last
 
 ## Крок 7. Відгук
 
+Прочитай довідник порад `${CLAUDE_SKILL_DIR}/references/tips.md`: три поради береш із нього, під індикатори,
+яких людині бракує, і для кожної називаєш індикатор та джерело з посиланням.
+
 Склади відгук точно за `${CLAUDE_SKILL_DIR}/references/report-template.md`: scorecard,
 патерни, сильні сторони, зони розвитку, **три поради з готовими шаблонами промптів під реальні
 задачі людини**, і — якщо є попередній результат — прогрес («було → стало»).
@@ -103,7 +106,8 @@ PY "${CLAUDE_SKILL_DIR}/scripts/fluency.py" save --file "<шлях до тимч
   "strengths": ["..."],
   "gaps": ["..."],
   "recommendations": [
-    {"title": "назва поради", "description": "чому це підніме слабкий D", "example_prompt": "шаблон промпту з відгуку"}
+    {"title": "назва поради", "description": "чому це підніме слабкий D", "example_prompt": "шаблон промпту з відгуку",
+     "indicator": "індикатор словами, без коду", "source": "назва джерела з tips.md", "source_url": "його посилання з tips.md"}
   ]
 }
 ```

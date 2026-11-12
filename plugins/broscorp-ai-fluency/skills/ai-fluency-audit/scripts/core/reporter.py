@@ -106,9 +106,13 @@ def _chip(c: dict) -> str:
     )
 
 
-def _progress_html(changes: list[dict], overall: float, previous: dict | None) -> str:
+def _progress_html(changes: list[dict], overall: float, previous: dict | None, rubric_changed: bool = False) -> str:
     if not changes:
         return ""
+    rubric_note = (
+        '<p class="chg-note">Попередній аудит оцінено за іншою версією рубрики, тому порівняння балів орієнтовне: '
+        "частина різниці може пояснюватися зміною критеріїв, а не вашої роботи.</p>"
+    ) if rubric_changed else ""
     prev_overall = round(sum(c["was"] for c in changes) / len(changes), 1)
     delta = round(overall - prev_overall, 1)
     overall_line = (
@@ -151,6 +155,7 @@ def _progress_html(changes: list[dict], overall: float, previous: dict | None) -
     <div class="section-title">📈 Прогрес{since}</div>
     <div class="change-box">
       <p class="chg-verdict">{verdict} {overall_line}</p>
+      {rubric_note}
       {blocks}
     </div>
   </div>"""
@@ -355,6 +360,20 @@ def _stats_html(result: dict, previous: dict | None) -> str:
   </details>"""
 
 
+def _rec_origin(rec: dict) -> str:
+    """Який індикатор закриває порада і з якого джерела її взято. Посилання — лише https."""
+    parts = []
+    if rec.get("indicator"):
+        parts.append(f'Індикатор: <b>{_e(rec["indicator"])}</b>')
+    name, url = str(rec.get("source", "")), str(rec.get("source_url", ""))
+    if name or url:
+        label = _e(name or url)
+        if url.startswith("https://"):
+            label = f'<a href="{_e(url)}" target="_blank" rel="noopener noreferrer">{label}</a>'
+        parts.append(f"За матеріалами: {label}")
+    return f'<div class="rec-origin">{" · ".join(parts)}</div>' if parts else ""
+
+
 def generate_html(result: dict, source: str, total_exchanges: int, previous: dict | None = None,
                   history: list | None = None) -> str:
     scores = result.get("scores", {})
@@ -409,12 +428,14 @@ def generate_html(result: dict, source: str, total_exchanges: int, previous: dic
 
     recs_html = ""
     for i, rec in enumerate(result.get("recommendations", []), 1):
+        origin = _rec_origin(rec)
         recs_html += f"""
         <div class="rec-card">
           <div class="rec-num">{i}</div>
           <div class="rec-body">
             <div class="rec-title">{_e(rec.get("title", ""))}</div>
             <div class="rec-desc">{_e(rec.get("description", ""))}</div>
+            {origin}
             <div class="rec-prompt-wrap">
               <div class="rec-prompt-label">💡 Шаблон промпту:</div>
               <div class="rec-prompt">{_e(rec.get("example_prompt", ""))}</div>
@@ -426,7 +447,8 @@ def generate_html(result: dict, source: str, total_exchanges: int, previous: dic
     summary = _e(result.get("summary", ""))
     source = _e(source)
     total_exchanges = _e(total_exchanges)
-    progress_html = _progress_html(changes, overall, previous)
+    rubric_changed = isinstance(previous, dict) and result.get("rubric", 1) != previous.get("rubric", 1)
+    progress_html = _progress_html(changes, overall, previous, rubric_changed)
     history_html = _history_html(history)
     stats_html = _stats_html(result, previous)
 
@@ -514,6 +536,8 @@ def generate_html(result: dict, source: str, total_exchanges: int, previous: dic
   .rec-body {{ flex: 1; }}
   .rec-title {{ font-size: 1rem; font-weight: 700; margin-bottom: 8px; }}
   .rec-desc {{ font-size: 0.88rem; color: var(--muted); line-height: 1.6; margin-bottom: 12px; }}
+  .rec-origin {{ font-size: 0.8rem; color: var(--muted); margin-bottom: 12px; }}
+  .rec-origin a {{ color: var(--accent); }}
   .rec-prompt-wrap {{ background: var(--surface2); border-radius: 10px; padding: 12px 16px; }}
   .rec-prompt-label {{ font-size: 0.78rem; color: var(--accent); font-weight: 600; margin-bottom: 6px; }}
   .rec-prompt {{ font-size: 0.87rem; line-height: 1.7; color: var(--text); white-space: pre-wrap; }}

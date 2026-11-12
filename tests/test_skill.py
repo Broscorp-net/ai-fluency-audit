@@ -170,6 +170,8 @@ class CliEndToEnd(unittest.TestCase):
                    "period_days": 30, "exchanges": 15, "dominant_mode": "Доповнення",
                    "summary": "Підсумок <script>alert(1)</script>", "patterns": ["патерн & деталь"],
                    "recommendations": [{"title": "Порада-один", "description": "чому",
+                                        "indicator": "перевіряє <твердження> ШІ", "source": "Джерело & Ко",
+                                        "source_url": "https://academy.claude.com/tutorials/discernment-toolkit",
                                         "example_prompt": "Зроби <що саме>\nГотово, коли <критерій>"}]}
         code, out, _ = self.run_cli("save", stdin=json.dumps(payload))
         self.assertEqual(code, 0, out)
@@ -181,6 +183,9 @@ class CliEndToEnd(unittest.TestCase):
         self.assertIn("&lt;script&gt;alert(1)&lt;/script&gt;", page)
         self.assertIn("патерн &amp; деталь", page)
         self.assertIn("Зроби &lt;що саме&gt;", page)
+        self.assertIn("Індикатор: <b>перевіряє &lt;твердження&gt; ШІ</b>", page)
+        self.assertIn('<a href="https://academy.claude.com/tutorials/discernment-toolkit"', page)
+        self.assertIn("Джерело &amp; Ко</a>", page)
         self.assertIn("Доповнення", page)
         self.assertNotIn("Прогрес", page)                                     # перший аудит — порівнювати ні з чим
         self.assertIn("Історія аудитів", page)
@@ -197,11 +202,13 @@ class CliEndToEnd(unittest.TestCase):
         self.assertIn("Прогрес", page)
         self.assertIn("▲ +2", page)
         self.assertIn("помітна зміна", page)                                  # два бали — варто уваги
+        self.assertNotIn("іншою версією рубрики", page)                       # обидва записи за однією рубрикою
         self.assertNotIn("у межах похибки", page.split("</style>")[1])
         self.assertIn('id="trend-tip"', page)                                 # тултіпи з назвами ліній
         self.assertIn("Description (Опис)", page)
 
         payload["scores"].update(description=6, diligence=5)                  # −1 і +1: похибка, не висновок
+        self.assertNotIn("іншою версією рубрики", page)                       # обидва записи за однією рубрикою
         self.run_cli("save", stdin=json.dumps(payload))
         newest = max((self.fl / "reports").glob("report-*.html"), key=lambda p: p.stat().st_mtime)
         body = newest.read_text(encoding="utf-8").split("</style>")[1]
@@ -219,11 +226,39 @@ class CliEndToEnd(unittest.TestCase):
         self.assertEqual(page.count('class="pt"'), 2)                         # обидва аудити на графіку
         self.assertIn("<polyline", page)
 
+    def test_rubric_version_is_saved_and_a_change_is_flagged(self):
+        payload = {"scores": {"delegation": 6, "description": 5, "discernment": 7, "diligence": 4}}
+        self.fl.mkdir(parents=True, exist_ok=True)                            # запис до появи версій рубрики
+        (self.fl / "history.json").write_text(json.dumps(
+            [{"date": "2026-10-01 12:00", "scores": payload["scores"], "overall": 5.5}]), encoding="utf-8")
+        code, out, _ = self.run_cli("save", stdin=json.dumps(payload))
+        self.assertEqual(code, 0, out)
+        hist = json.loads(self.run_cli("history")[1])
+        self.assertEqual([h["rubric"] for h in hist], [1, 2])
+        page = max((self.fl / "reports").glob("report-*.html"), key=lambda p: p.stat().st_mtime).read_text(encoding="utf-8")
+        self.assertIn("іншою версією рубрики", page)
+        rubric = (SKILL / "references" / "rubric-4d.md").read_text(encoding="utf-8")
+        self.assertIn(f"версія {hist[-1]['rubric']}", rubric.splitlines()[0])  # номер у коді й у заголовку збігаються
+
     def test_collect_stats_reach_history_and_report(self):
         payload = {"scores": {"delegation": 6, "description": 5, "discernment": 7, "diligence": 4}}
         self.run_cli("collect", "--days", "30")
         code, out, _ = self.run_cli("save", stdin=json.dumps(payload))
         self.assertEqual(code, 0, out)
+    def test_rubric_version_is_saved_and_a_change_is_flagged(self):
+        payload = {"scores": {"delegation": 6, "description": 5, "discernment": 7, "diligence": 4}}
+        self.fl.mkdir(parents=True, exist_ok=True)                            # запис до появи версій рубрики
+        (self.fl / "history.json").write_text(json.dumps(
+            [{"date": "2026-10-01 12:00", "scores": payload["scores"], "overall": 5.5}]), encoding="utf-8")
+        code, out, _ = self.run_cli("save", stdin=json.dumps(payload))
+        self.assertEqual(code, 0, out)
+        hist = json.loads(self.run_cli("history")[1])
+        self.assertEqual([h["rubric"] for h in hist], [1, 2])
+        page = max((self.fl / "reports").glob("report-*.html"), key=lambda p: p.stat().st_mtime).read_text(encoding="utf-8")
+        self.assertIn("іншою версією рубрики", page)
+        rubric = (SKILL / "references" / "rubric-4d.md").read_text(encoding="utf-8")
+        self.assertIn(f"версія {hist[-1]['rubric']}", rubric.splitlines()[0])  # номер у коді й у заголовку збігаються
+
         last = json.loads(self.run_cli("last")[1])
         self.assertEqual(last["exchanges"], 15)                               # з collect, а не зі слів моделі
         stats = last["stats"]
@@ -350,6 +385,11 @@ class SkillPackage(unittest.TestCase):
         rubric = (SKILL / "references" / "rubric-4d.md").read_text(encoding="utf-8")
         for d in ("Delegation", "Description", "Discernment", "Diligence"):
             self.assertIn(d, rubric)
+        tips = (SKILL / "references" / "tips.md").read_text(encoding="utf-8")
+        for prefix, count in (("Del", 7), ("Des", 8), ("Dis", 5), ("Dil", 4)):   # 24 індикатори Anthropic
+            for n in range(1, count + 1):
+                self.assertIn(f"**{prefix}{n}. ", rubric)
+                self.assertIn(f"**{prefix}{n}. ", tips)                        # до кожного є поради з джерел
         template = (SKILL / "references" / "report-template.md").read_text(encoding="utf-8")
         for needle in ("Scorecard", "Прогрес", "шаблон промпту"):
             self.assertIn(needle.lower(), template.lower())

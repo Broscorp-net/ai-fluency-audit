@@ -252,6 +252,8 @@ def cmd_save(a) -> None:
     stats = _clean_stats(data.get("stats")) or (None if a.date else _recent_stats())
     if stats:
         entry["stats"] = stats
+        if stats.get("exchanges_total") is not None:
+            entry["exchanges"] = stats["exchanges_total"]  # число з collect, а не зі слів моделі
 
     path = _history_file()
     history = _load_history()

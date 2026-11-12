@@ -224,7 +224,9 @@ class CliEndToEnd(unittest.TestCase):
         self.run_cli("collect", "--days", "30")
         code, out, _ = self.run_cli("save", stdin=json.dumps(payload))
         self.assertEqual(code, 0, out)
-        stats = json.loads(self.run_cli("last")[1])["stats"]
+        last = json.loads(self.run_cli("last")[1])
+        self.assertEqual(last["exchanges"], 15)                               # з collect, а не зі слів моделі
+        stats = last["stats"]
         self.assertEqual(stats["projects"], 2)                                # кількість, а не назви проєктів
         self.assertEqual(stats["exchanges_total"], 15)
         self.assertEqual(stats["masked_fragments"], 1)

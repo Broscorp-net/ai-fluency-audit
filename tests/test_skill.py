@@ -170,6 +170,30 @@ class CliEndToEnd(unittest.TestCase):
         self.assertEqual(page.count('class="pt"'), 2)                         # обидва аудити на графіку
         self.assertIn("<polyline", page)
 
+    def test_collect_stats_reach_history_and_report(self):
+        payload = {"scores": {"delegation": 6, "description": 5, "discernment": 7, "diligence": 4}}
+        self.run_cli("collect", "--days", "30")
+        code, out, _ = self.run_cli("save", stdin=json.dumps(payload))
+        self.assertEqual(code, 0, out)
+        stats = json.loads(self.run_cli("last")[1])["stats"]
+        self.assertEqual(stats["projects"], 2)                                # кількість, а не назви проєктів
+        self.assertEqual(stats["exchanges_total"], 15)
+        self.assertEqual(stats["masked_fragments"], 1)
+        self.assertNotIn("secret-client", (self.fl / "history.json").read_text(encoding="utf-8"))
+        page = max((self.fl / "reports").glob("report-*.html"), key=lambda p: p.stat().st_mtime).read_text(encoding="utf-8")
+        self.assertIn('<details class="stats">', page)                        # під катом, згорнуто
+        self.assertNotIn("<details open", page)
+        self.assertIn("Медіанна довжина промпту", page)
+        self.assertNotIn("<th>Попередній</th>", page)
+
+        self.run_cli("save", stdin=json.dumps(payload))                       # без нового collect числа не переносяться
+        self.assertNotIn("stats", json.loads(self.run_cli("last")[1]))
+        self.run_cli("collect", "--days", "30")
+        self.run_cli("save", "--date", "2020-01-01", stdin=json.dumps(payload))  # минулий період — чужі числа не беремо
+        self.assertNotIn("stats", json.loads(self.run_cli("history")[1])[0])
+        self.run_cli("save", stdin=json.dumps({**payload, "stats": {"sessions": 3, "prompt_chars_median": 55, "x": "y"}}))
+        self.assertEqual(json.loads(self.run_cli("last")[1])["stats"], {"sessions": 3, "prompt_chars_median": 55})
+
     def test_save_with_date_inserts_chronologically(self):
         def scores(v):
             return json.dumps({"scores": {"delegation": v, "description": v, "discernment": v, "diligence": v}})

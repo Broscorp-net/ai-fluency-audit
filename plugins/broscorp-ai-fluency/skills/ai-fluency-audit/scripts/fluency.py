@@ -34,6 +34,12 @@ from core.redact import redact  # noqa: E402
 DIMENSIONS = ("delegation", "description", "discernment", "diligence")
 MIN_RELIABLE = 10  # менше діалогів — оцінка ненадійна
 SHORT_PROMPT = 40  # символів
+# Числа з collect, які зберігаються в історії й показуються у звіті (без назв проєктів)
+STAT_KEYS = (
+    "sessions", "projects", "exchanges_total", "exchanges_in_sample", "with_tool_actions",
+    "interrupted_by_user", "prompt_chars_median", "prompts_under_40_chars_pct", "masked_fragments",
+)
+STATS_MAX_AGE_HOURS = 12
 
 
 def _home() -> Path:
@@ -51,6 +57,49 @@ def _load_history() -> list[dict]:
         return data if isinstance(data, list) else []
     except (OSError, ValueError):
         return []
+
+
+def _stats_file() -> Path:
+    return _home() / "last-collect.json"
+
+
+def _clean_stats(raw) -> dict | None:
+    """Лишає тільки відомі числові поля; замість назв проєктів — їх кількість."""
+    if not isinstance(raw, dict):
+        return None
+    out = {}
+    for key in STAT_KEYS:
+        v = raw.get(key)
+        if key == "projects" and isinstance(v, dict):
+            v = len(v)
+        if isinstance(v, int) and not isinstance(v, bool) and v >= 0:
+            out[key] = v
+    return out or None
+
+
+def _remember_stats(stats: dict) -> None:
+    """collect лишає числа для save, щоб модель не переписувала їх руками."""
+    clean = _clean_stats(stats)
+    if not clean:
+        return
+    try:
+        path = _stats_file()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(
+            {"collected_at": datetime.now(timezone.utc).isoformat(), **clean}), encoding="utf-8")
+    except OSError:
+        pass  # статистика у звіті — додаткова; збір вибірки через неї не падає
+
+
+def _recent_stats() -> dict | None:
+    try:
+        raw = json.loads(_stats_file().read_text(encoding="utf-8"))
+        age = datetime.now(timezone.utc) - datetime.fromisoformat(raw["collected_at"])
+    except (OSError, ValueError, KeyError, TypeError):
+        return None
+    if not timedelta(0) <= age <= timedelta(hours=STATS_MAX_AGE_HOURS):
+        return None
+    return _clean_stats(raw)
 
 
 def _out(obj) -> None:
@@ -121,6 +170,7 @@ def cmd_collect(a) -> None:
         "masked_fragments": masked,
         "reliable": len(exchanges) >= MIN_RELIABLE,
     }
+    _remember_stats(stats)
     print("=== STATS ===")
     _out(stats)
     print("=== ДІАЛОГИ ===")
@@ -177,6 +227,12 @@ def cmd_save(a) -> None:
         "gaps": [str(p)[:300] for p in data.get("gaps", [])][:5],
     }
 
+    # Явне поле stats у JSON має пріоритет; інакше — числа останнього collect.
+    # Для аудиту за минулий період (--date) останній collect стосується іншого вікна.
+    stats = _clean_stats(data.get("stats")) or (None if a.date else _recent_stats())
+    if stats:
+        entry["stats"] = stats
+
     path = _history_file()
     history = _load_history()
     at = len(history)
@@ -189,6 +245,8 @@ def cmd_save(a) -> None:
     tmp.write_text(json.dumps(history, ensure_ascii=False, indent=2), encoding="utf-8")
     tmp.replace(path)
     print(f"Збережено ({at + 1}-й запис із {len(history)}) → {path}")
+    if stats and not data.get("stats"):
+        _stats_file().unlink(missing_ok=True)  # використано; до наступного аудиту не переходить
 
     if a.no_report:
         return

@@ -72,7 +72,7 @@ def _changes(scores: dict, previous, before_previous=None) -> list[dict]:
     Зміна кожного D проти попереднього аудиту з оцінкою, чи варта вона уваги:
       notable — від двох балів;
       trend   — один бал, але в той самий бік, що й між двома попередніми аудитами;
-      noise   — один бал без підтвердження: може бути випадковістю вибірки;
+      noise   — один бал без підтвердження: може бути ефектом вибірки;
       same    — без змін.
     """
     now, was, earlier = _int_scores({"scores": scores}), _int_scores(previous), _int_scores(before_previous)
@@ -132,7 +132,7 @@ def _progress_html(changes: list[dict], overall: float, previous: dict | None) -
             '<div class="chg chg-noise"><div class="chg-title">У межах похибки — зміна на один бал</div>'
             + "".join(_chip(c) for c in groups["noise"])
             + '<p class="chg-note">Один бал різниці за окремим показником ще не означає, що ви стали працювати краще чи гірше: '
-              "оцінка ставиться за випадковою вибіркою діалогів, і інша вибірка могла б дати сусідній бал. "
+              "оцінка ставиться за вибіркою (кожен k-й діалог періоду), і інша вибірка могла б дати сусідній бал. "
               "Якщо наступний аудит покаже зміну в той самий бік, це вже тенденція.</p></div>"
         )
     if groups["same"]:
@@ -311,6 +311,49 @@ def _history_html(history: list | None, limit: int = 12) -> str:
   </div>"""
 
 
+STAT_ROWS = [
+    ("sessions", "Сесій за період", ""),
+    ("projects", "Проєктів", ""),
+    ("exchanges_total", "Діалогів за період", ""),
+    ("exchanges_in_sample", "Діалогів у вибірці, яку прочитав оцінювач", ""),
+    ("with_tool_actions", "Діалогів, де ШІ викликав інструменти", ""),
+    ("interrupted_by_user", "Дій ШІ, які ви перервали або відхилили", ""),
+    ("prompt_chars_median", "Медіанна довжина промпту", " симв."),
+    ("prompts_under_40_chars_pct", "Промптів, коротших за 40 символів", "%"),
+    ("masked_fragments", "Замаскованих секретів і персональних даних у вибірці", ""),
+]
+
+
+def _stat_values(entry) -> dict:
+    raw = entry.get("stats") if isinstance(entry, dict) else None
+    if not isinstance(raw, dict):
+        return {}
+    return {k: v for k, v in raw.items() if isinstance(v, int) and not isinstance(v, bool)}
+
+
+def _stats_html(result: dict, previous: dict | None) -> str:
+    """Згорнутий блок із числами збору. Це підказки для оцінювача, у бали вони не підставляються."""
+    now, before = _stat_values(result), _stat_values(previous)
+    rows = [(label, unit, now[key], before.get(key)) for key, label, unit in STAT_ROWS if key in now]
+    if not rows:
+        return ""
+    has_before = any(b is not None for *_, b in rows)
+    head = "<th>Показник</th><th>Цей аудит</th>" + ("<th>Попередній</th>" if has_before else "")
+    body = ""
+    for label, unit, value, prev in rows:
+        prev_cell = ""
+        if has_before:
+            prev_cell = f"<td>{_e(prev)}{unit}</td>" if prev is not None else "<td>—</td>"
+        body += f"<tr><td>{label}</td><td><strong>{_e(value)}{unit}</strong></td>{prev_cell}</tr>"
+    return f"""
+  <details class="stats">
+    <summary>Статистика збору</summary>
+    <table class="stats-table"><thead><tr>{head}</tr></thead><tbody>{body}</tbody></table>
+    <div class="chg-note">Усі числа, крім розміру вибірки й замаскованих фрагментів, пораховано за всіма діалогами
+    періоду. Оцінювач бачить їх як підказку; у бали вони не підставляються.</div>
+  </details>"""
+
+
 def generate_html(result: dict, source: str, total_exchanges: int, previous: dict | None = None,
                   history: list | None = None) -> str:
     scores = result.get("scores", {})
@@ -384,6 +427,7 @@ def generate_html(result: dict, source: str, total_exchanges: int, previous: dic
     total_exchanges = _e(total_exchanges)
     progress_html = _progress_html(changes, overall, previous)
     history_html = _history_html(history)
+    stats_html = _stats_html(result, previous)
 
     overall_color = _score_color(int(overall))
 
@@ -501,6 +545,14 @@ def generate_html(result: dict, source: str, total_exchanges: int, previous: dic
   .trend-legend i {{ display: inline-block; width: 14px; height: 3px; border-radius: 2px; margin-right: 6px; vertical-align: middle; }}
   .history-note {{ color: var(--muted); font-size: 0.85rem; margin-top: 10px; }}
 
+  .stats {{ background: var(--surface); border: 1px solid var(--border); border-radius: 12px; padding: 14px 20px; margin: 16px 0 32px; }}
+  .stats summary {{ cursor: pointer; color: var(--muted); font-size: 0.9rem; font-weight: 600; }}
+  .stats[open] summary {{ margin-bottom: 12px; }}
+  .stats-table {{ width: 100%; border-collapse: collapse; font-size: 0.87rem; }}
+  .stats-table th {{ text-align: left; color: var(--muted); font-weight: 600; font-size: 0.78rem; padding: 6px 8px; border-bottom: 1px solid var(--border); }}
+  .stats-table td {{ padding: 7px 8px; border-bottom: 1px solid var(--surface2); }}
+  .stats-table td:not(:first-child), .stats-table th:not(:first-child) {{ text-align: right; white-space: nowrap; }}
+
   /* Summary */
   .summary-box {{
     background: var(--surface); border: 1px solid var(--accent);
@@ -542,6 +594,7 @@ def generate_html(result: dict, source: str, total_exchanges: int, previous: dic
   <div class="score-grid">{score_cards}</div>
 {progress_html}
 {history_html}
+{stats_html}
 
   <div class="section">
     <div class="section-title">📊 Виявлені патерни</div>

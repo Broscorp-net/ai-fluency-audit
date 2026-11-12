@@ -82,6 +82,22 @@ class ParseRecords(unittest.TestCase):
         self.assertTrue(self.ex[0].timestamp.startswith("2026-11-05"))
 
 
+class ShellAndPaste(unittest.TestCase):
+    def test_shell_commands_run_by_user_are_not_prompts(self):
+        ex = cc.parse_records([
+            _u("<bash-input>aws login</bash-input>", "b1"),
+            _u("<bash-stdout>ok</bash-stdout><bash-stderr></bash-stderr>", "b2"),
+            _u("Чому логін не спрацював?", "b3"),
+        ])
+        self.assertEqual([e.user for e in ex], ["Чому логін не спрацював?"])
+
+    def test_pasted_text_becomes_a_short_marker(self):
+        ex = cc.parse_records([
+            _u('Розберись із цим логом <pasted_content id="ab12">' + "E" * 5000 + '</pasted_content id="ab12"> і виправ', "p1"),
+        ])
+        self.assertEqual(ex[0].user, "Розберись із цим логом [вставлений текст, 5000 символів] і виправ")
+
+
 class Formatting(unittest.TestCase):
     def test_format_has_tools_and_interrupt_but_no_project(self):
         text = format_for_analysis(cc.parse_records(SESSION, project="secret-client", session="S1"))

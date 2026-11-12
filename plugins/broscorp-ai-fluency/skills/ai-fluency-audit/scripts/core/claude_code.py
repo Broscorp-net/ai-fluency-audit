@@ -120,10 +120,13 @@ def _peek_cwd(path: Path) -> str:
 _INJECTED = re.compile(
     r"<(system-reminder|local-command-caveat|local-command-stdout|local-command-stderr|"
     r"command-name|command-message|command-args|ide_opened_file|ide_selection|"
-    r"task-notification|side-sessions-event|ci-monitor-event|user-prompt-submit-hook)\b[^>]*>"
+    r"task-notification|side-sessions-event|ci-monitor-event|user-prompt-submit-hook|"
+    r"bash-input|bash-stdout|bash-stderr)\b[^>]*>"
     r".*?</\1>",
     re.S,
 )
+# Вставлений із буфера текст (логи, листи): це не слова людини, і він з'їдає ліміт промпту
+_PASTED = re.compile(r"<pasted_content\b[^>]*>(.*?)</pasted_content\b[^>]*>", re.S)  # id є і в закривному тегу
 _NOISE_PREFIXES = (
     "Caveat:",
     "This session is being continued from a previous conversation",
@@ -166,7 +169,8 @@ def _human_text(content) -> tuple[str, bool]:
             elif kind == "tool_result" and b.get("is_error"):
                 if any(m in _flat(b.get("content")).lower() for m in _REJECT_MARKERS):
                     rejected = True
-    text = _INJECTED.sub("", "\n".join(parts)).strip()
+    text = _INJECTED.sub("", "\n".join(parts))
+    text = _PASTED.sub(lambda m: f"[вставлений текст, {len(m.group(1).strip())} символів]", text).strip()
     if text.startswith(_NOISE_PREFIXES):
         text = ""
     return text, rejected

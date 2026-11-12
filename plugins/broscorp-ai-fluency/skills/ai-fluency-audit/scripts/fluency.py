@@ -28,7 +28,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from core import claude_code, reporter  # noqa: E402
-from core.parsers import auto_detect_and_parse, format_for_analysis, sample_exchanges  # noqa: E402
+from core.parsers import PROMPT_LIMIT, auto_detect_and_parse, format_for_analysis, sample_exchanges  # noqa: E402
 from core.redact import redact  # noqa: E402
 
 DIMENSIONS = ("delegation", "description", "discernment", "diligence")
@@ -172,7 +172,9 @@ def cmd_collect(a) -> None:
 
     lengths = [len(e.user) for e in exchanges]
     sample = sample_exchanges(exchanges, a.max)
-    text, masked = redact(format_for_analysis(sample, with_project=True))
+    text, _ = redact(format_for_analysis(sample, with_project=True))
+    # Сигнал Diligence — лише те, що передала сама людина; маски у відповідях ШІ не рахуємо
+    masked = sum(redact(e.user[:PROMPT_LIMIT])[1] for e in sample)
 
     stats = {
         "period_days": a.days,

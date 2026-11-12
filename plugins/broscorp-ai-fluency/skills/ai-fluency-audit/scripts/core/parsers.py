@@ -240,6 +240,9 @@ def _extract_gemini_text(parts: list) -> str:
     return " ".join(t for t in texts if t).strip()
 
 
+PROMPT_LIMIT = 600  # скільки символів промпту бачить оцінювач
+
+
 def sample_exchanges(exchanges: list[Exchange], max_exchanges: int = 40) -> list[Exchange]:
     """Return a representative sample — prefer recent, keep diversity."""
     if len(exchanges) <= max_exchanges:
@@ -262,7 +265,7 @@ def format_for_analysis(exchanges: list[Exchange], with_project: bool = False) -
             header += f" · проєкт {ex.project}"
         header += " ---"
         lines.append(header)
-        lines.append(f"[КОРИСТУВАЧ]: {ex.user[:600]}")
+        lines.append(f"[КОРИСТУВАЧ]: {ex.user[:PROMPT_LIMIT]}")
         if ex.tools:
             counts = Counter(ex.tools)
             lines.append("[ДІЇ ШІ]: " + ", ".join(

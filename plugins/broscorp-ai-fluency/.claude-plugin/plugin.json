@@ -1,6 +1,6 @@
 {
   "name": "broscorp-ai-fluency",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "description": "Персональний аудит AI Fluency за моделлю 4D (Delegation, Description, Discernment, Diligence) на основі локальної історії Claude Code",
   "author": { "name": "Broscorp" },
   "keywords": ["ai-fluency", "4d", "prompting", "audit", "broscorp"]

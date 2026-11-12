@@ -116,6 +116,91 @@ class CliEndToEnd(unittest.TestCase):
         self.assertEqual(len(hist), 2)
         self.assertEqual(hist[0]["delegation"], 6)
 
+    def test_save_writes_escaped_html_report_with_progress(self):
+        payload = {"scores": {"delegation": 6, "description": 5, "discernment": 7, "diligence": 4},
+                   "period_days": 30, "exchanges": 15, "dominant_mode": "Доповнення",
+                   "summary": "Підсумок <script>alert(1)</script>", "patterns": ["патерн & деталь"],
+                   "recommendations": [{"title": "Порада-один", "description": "чому",
+                                        "example_prompt": "Зроби <що саме>\nГотово, коли <критерій>"}]}
+        code, out, _ = self.run_cli("save", stdin=json.dumps(payload))
+        self.assertEqual(code, 0, out)
+        reports = sorted((self.fl / "reports").glob("report-*.html"))
+        self.assertEqual(len(reports), 1)
+        self.assertIn(str(reports[0]), out)
+        page = reports[0].read_text(encoding="utf-8")
+        self.assertNotIn("<script>alert", page)                               # текст із даних не стає тегом
+        self.assertIn("&lt;script&gt;alert(1)&lt;/script&gt;", page)
+        self.assertIn("патерн &amp; деталь", page)
+        self.assertIn("Зроби &lt;що саме&gt;", page)
+        self.assertIn("Доповнення", page)
+        self.assertNotIn("Прогрес", page)                                     # перший аудит — порівнювати ні з чим
+        self.assertIn("Історія аудитів", page)
+        self.assertIn("Це перший збережений аудит", page)
+        self.assertEqual(page.count('class="pt"'), 1)                         # одна точка на графіку
+        self.assertNotIn("<polyline", page)                                   # лінія — лише з двох точок
+        last = json.loads(self.run_cli("last")[1])
+        self.assertNotIn("recommendations", last)                            # поради в історію не пишуться
+
+        payload["scores"]["description"] = 7
+        self.run_cli("save", stdin=json.dumps(payload))
+        newest = max((self.fl / "reports").glob("report-*.html"), key=lambda p: p.stat().st_mtime)
+        page = newest.read_text(encoding="utf-8")
+        self.assertIn("Прогрес", page)
+        self.assertIn("▲ +2", page)
+        self.assertIn("помітна зміна", page)                                  # два бали — варто уваги
+        self.assertNotIn("у межах похибки", page.split("</style>")[1])
+        self.assertIn('id="trend-tip"', page)                                 # тултіпи з назвами ліній
+        self.assertIn("Description (Опис)", page)
+
+        payload["scores"].update(description=6, diligence=5)                  # −1 і +1: похибка, не висновок
+        self.run_cli("save", stdin=json.dumps(payload))
+        newest = max((self.fl / "reports").glob("report-*.html"), key=lambda p: p.stat().st_mtime)
+        body = newest.read_text(encoding="utf-8").split("</style>")[1]
+        self.assertIn("Помітних змін порівняно з попереднім аудитом немає", body)
+        self.assertEqual(body.count("· у межах похибки"), 2)
+        self.assertNotIn("помітна зміна", body)
+
+        payload["scores"].update(diligence=6)                                 # другий +1 поспіль — тенденція
+        self.run_cli("save", stdin=json.dumps(payload))
+        newest = max((self.fl / "reports").glob("report-*.html"), key=lambda p: p.stat().st_mtime)
+        body = newest.read_text(encoding="utf-8").split("</style>")[1]
+        self.assertIn("Схоже на тенденцію", body)
+        self.assertIn("· тенденція", body)
+        self.assertIn("Зверніть увагу: Diligence.", body)
+        self.assertEqual(page.count('class="pt"'), 2)                         # обидва аудити на графіку
+        self.assertIn("<polyline", page)
+
+    def test_save_with_date_inserts_chronologically(self):
+        def scores(v):
+            return json.dumps({"scores": {"delegation": v, "description": v, "discernment": v, "diligence": v}})
+        self.run_cli("save", "--no-report", stdin=scores(7))                              # сьогодні
+        code, out, _ = self.run_cli("save", "--date", "2020-01-15", stdin=scores(4))      # аудит за минулий період
+        self.assertEqual(code, 0, out)
+        hist = json.loads(self.run_cli("history")[1])
+        self.assertEqual([h["delegation"] for h in hist], [4, 7])
+        self.assertTrue(hist[0]["date"].startswith("2020-01-15"))
+        self.assertEqual(json.loads(self.run_cli("last")[1])["scores"]["delegation"], 7)
+        page = next((self.fl / "reports").glob("report-*.html")).read_text(encoding="utf-8")
+        self.assertEqual(page.count('class="pt"'), 1)                         # звіт за минуле не показує майбутніх аудитів
+        self.assertNotIn("Прогрес", page)
+        self.assertEqual(self.run_cli("save", "--date", "15.01.2020", stdin=scores(4))[0], 2)
+
+    def test_report_survives_foreign_history_entries(self):
+        self.fl.mkdir(parents=True)
+        (self.fl / "history.json").write_text(json.dumps([{"date": "2026-01-01", "scores": {"delegation": "x"}}, "сміття"]),
+                                              encoding="utf-8")
+        good = {"scores": {"delegation": 5, "description": 5, "discernment": 5, "diligence": 5}}
+        code, out, err = self.run_cli("save", stdin=json.dumps(good))
+        self.assertEqual((code, err), (0, ""))
+        page = next((self.fl / "reports").glob("report-*.html")).read_text(encoding="utf-8")
+        self.assertEqual(page.count('class="pt"'), 1)
+
+    def test_save_no_report_flag(self):
+        good = {"scores": {"delegation": 5, "description": 5, "discernment": 5, "diligence": 5}}
+        code, out, _ = self.run_cli("save", "--no-report", stdin=json.dumps(good))
+        self.assertEqual(code, 0)
+        self.assertFalse((self.fl / "reports").exists())
+
     def test_save_rejects_bad_input_and_leaves_history_intact(self):
         good = {"scores": {"delegation": 5, "description": 5, "discernment": 5, "diligence": 5}}
         self.run_cli("save", stdin=json.dumps(good))

@@ -15,7 +15,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 SRC = ROOT / "core"
 DST = ROOT / "plugins" / "broscorp-ai-fluency" / "skills" / "ai-fluency-audit" / "scripts" / "core"
-FILES = ("__init__.py", "parsers.py", "claude_code.py", "redact.py")
+FILES = ("__init__.py", "parsers.py", "claude_code.py", "redact.py", "reporter.py")
 
 
 def out_of_sync() -> list[str]:

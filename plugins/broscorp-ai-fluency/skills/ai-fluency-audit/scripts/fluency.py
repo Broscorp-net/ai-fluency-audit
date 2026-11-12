@@ -8,10 +8,11 @@
   collect   — підготувати замасковану вибірку діалогів + статистику для оцінки
   last      — попередній збережений результат (для порівняння прогресу)
   history   — усі збережені результати (динаміка)
-  save      — зберегти новий результат (JSON з --file або зі stdin)
+  save      — зберегти новий результат (JSON з --file або зі stdin) і скласти HTML-звіт
 
 Нічого не відправляється в мережу: скрипт лише читає ~/.claude/projects
-і пише власну історію результатів у ~/.claude/ai-fluency/history.json.
+і пише власну історію результатів у ~/.claude/ai-fluency/history.json
+та HTML-звіти в ~/.claude/ai-fluency/reports/ (звичайні файли, без вебсервера).
 """
 from __future__ import annotations
 
@@ -26,7 +27,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from core import claude_code  # noqa: E402
+from core import claude_code, reporter  # noqa: E402
 from core.parsers import format_for_analysis, sample_exchanges  # noqa: E402
 from core.redact import redact  # noqa: E402
 
@@ -35,9 +36,13 @@ MIN_RELIABLE = 10  # менше діалогів — оцінка ненадій
 SHORT_PROMPT = 40  # символів
 
 
-def _history_file() -> Path:
+def _home() -> Path:
     base = os.environ.get("AI_FLUENCY_HOME")
-    return (Path(base) if base else Path.home() / ".claude" / "ai-fluency") / "history.json"
+    return Path(base) if base else Path.home() / ".claude" / "ai-fluency"
+
+
+def _history_file() -> Path:
+    return _home() / "history.json"
 
 
 def _load_history() -> list[dict]:
@@ -153,8 +158,15 @@ def cmd_save(a) -> None:
         if isinstance(v, bool) or not isinstance(v, int) or not 1 <= v <= 10:
             _fail(f"scores.{key} має бути цілим числом 1–10, отримано {v!r}")
 
+    when = datetime.now()
+    if a.date:  # аудит за минулий період: запис стає на своє місце за хронологією
+        try:
+            when = datetime.strptime(a.date, "%Y-%m-%d").replace(hour=12)
+        except ValueError:
+            _fail(f"--date має бути у форматі РРРР-ММ-ДД, отримано {a.date!r}")
+
     entry = {
-        "date": datetime.now().strftime("%Y-%m-%d %H:%M"),
+        "date": when.strftime("%Y-%m-%d %H:%M"),
         "scores": {k: scores[k] for k in DIMENSIONS},
         "overall": round(sum(scores[k] for k in DIMENSIONS) / 4, 1),
         "period_days": data.get("period_days"),
@@ -167,12 +179,36 @@ def cmd_save(a) -> None:
 
     path = _history_file()
     history = _load_history()
-    history.append(entry)
+    at = len(history)
+    while at and isinstance(history[at - 1], dict) and str(history[at - 1].get("date", "")) > entry["date"]:
+        at -= 1
+    previous = history[at - 1] if at else None
+    history.insert(at, entry)
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_suffix(".tmp")
     tmp.write_text(json.dumps(history, ensure_ascii=False, indent=2), encoding="utf-8")
     tmp.replace(path)
-    print(f"Збережено ({len(history)}-й запис) → {path}")
+    print(f"Збережено ({at + 1}-й запис із {len(history)}) → {path}")
+
+    if a.no_report:
+        return
+    # Поради з шаблонами промптів ідуть лише у звіт; в історію не пишуться
+    recs = [
+        {k: str(r.get(k, ""))[:limit] for k, limit in (("title", 200), ("description", 600), ("example_prompt", 2000))}
+        for r in data.get("recommendations", []) if isinstance(r, dict)
+    ][:5]
+    period = f" · {entry['period_days']} днів" if entry["period_days"] else ""
+    page = reporter.generate_html(
+        {**entry, "recommendations": recs, "dominant_mode": str(data.get("dominant_mode", ""))[:60]},
+        source=f"Claude Code{period}",
+        total_exchanges=entry["exchanges"] if entry["exchanges"] is not None else "—",
+        previous=previous,
+        history=history[:at + 1],
+    )
+    report = _home() / "reports" / f"report-{datetime.now().strftime('%Y-%m-%d-%H%M%S')}.html"
+    report.parent.mkdir(parents=True, exist_ok=True)
+    report.write_text(page, encoding="utf-8")
+    print(f"HTML-звіт → {report}")
 
 
 # ── CLI ──────────────────────────────────────────────────────────────────────
@@ -203,6 +239,8 @@ def main() -> None:
     sub.add_parser("history").set_defaults(fn=cmd_history)
     ss = sub.add_parser("save")
     ss.add_argument("--file", help="JSON-файл із результатом (інакше читається stdin)")
+    ss.add_argument("--no-report", action="store_true", help="не складати HTML-звіт")
+    ss.add_argument("--date", metavar="РРРР-ММ-ДД", help="дата аудиту, якщо він за минулий період (типово — сьогодні)")
     ss.set_defaults(fn=cmd_save)
 
     a = p.parse_args()

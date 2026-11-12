@@ -1,10 +1,21 @@
 """
-Parsers for ChatGPT, Claude, and Gemini chat export formats.
-Each parser returns a list of conversations: [{"user": str, "assistant": str}, ...]
+Парсери експортів ChatGPT, Claude (claude.ai) і Gemini — для історії, яку додають вручну
+(`fluency.py collect --add <файл>`), а також вибірка й форматування діалогів для оцінювача.
 """
 import json
 from collections import Counter
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
+
+
+def _iso(value) -> str:
+    """Час повідомлення з експорту → ISO-рядок (як у Claude Code) або порожній рядок."""
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        try:
+            return datetime.fromtimestamp(value, tz=timezone.utc).isoformat()
+        except (OverflowError, OSError, ValueError):
+            return ""
+    return value if isinstance(value, str) else ""
 
 
 @dataclass
@@ -56,7 +67,7 @@ def parse_chatgpt(data: list) -> list[Exchange]:
                     parts = content.get("parts", [])
                     text = " ".join(str(p) for p in parts if isinstance(p, str)).strip()
                     if text:
-                        thread.insert(0, {"role": role, "content": text})
+                        thread.insert(0, {"role": role, "content": text, "ts": _iso(msg.get("create_time"))})
             node_id = node.get("parent")
 
         exchanges.extend(_thread_to_exchanges(thread))
@@ -85,7 +96,7 @@ def parse_claude(data: list | dict) -> list[Exchange]:
                     for p in content
                 )
             if isinstance(content, str) and content.strip():
-                thread.append({"role": role, "content": content.strip()})
+                thread.append({"role": role, "content": content.strip(), "ts": _iso(msg.get("created_at"))})
 
         exchanges.extend(_thread_to_exchanges(thread))
 
@@ -206,13 +217,14 @@ def _thread_to_exchanges(thread: list[dict]) -> list[Exchange]:
     while i < len(thread):
         if thread[i]["role"] == "user":
             user_text = thread[i]["content"]
+            stamp = thread[i].get("ts", "")
             assistant_text = ""
             if i + 1 < len(thread) and thread[i + 1]["role"] == "assistant":
                 assistant_text = thread[i + 1]["content"]
                 i += 2
             else:
                 i += 1
-            exchanges.append(Exchange(user=user_text, assistant=assistant_text))
+            exchanges.append(Exchange(user=user_text, assistant=assistant_text, timestamp=stamp))
         else:
             i += 1
     return exchanges

@@ -28,7 +28,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from core import claude_code, reporter  # noqa: E402
-from core.parsers import format_for_analysis, sample_exchanges  # noqa: E402
+from core.parsers import auto_detect_and_parse, format_for_analysis, sample_exchanges  # noqa: E402
 from core.redact import redact  # noqa: E402
 
 DIMENSIONS = ("delegation", "description", "discernment", "diligence")
@@ -38,6 +38,7 @@ SHORT_PROMPT = 40  # символів
 STAT_KEYS = (
     "sessions", "projects", "exchanges_total", "exchanges_in_sample", "with_tool_actions",
     "interrupted_by_user", "prompt_chars_median", "prompts_under_40_chars_pct", "masked_fragments",
+    "imported_exchanges",
 )
 STATS_MAX_AGE_HOURS = 12
 
@@ -138,12 +139,28 @@ def cmd_collect(a) -> None:
     ]
     sessions.sort(key=lambda s: s.modified)
 
-    if not sessions:
+    # Історія, додана вручну: експорт ChatGPT / claude.ai / Gemini або файл сесії Claude Code
+    imported, sources = [], Counter()
+    for n, raw_path in enumerate(a.add, 1):
+        try:
+            found, source = auto_detect_and_parse(Path(raw_path).expanduser().read_bytes())
+        except OSError as e:
+            _fail(f"не вдалося прочитати {raw_path}: {e}")
+        except (ValueError, AttributeError, TypeError, KeyError) as e:
+            _fail(f"{raw_path}: формат не розпізнано ({e})")
+        found = claude_code._since(found, cutoff)  # діалоги без дати лишаються: відсіяти їх нічим
+        for e in found:
+            e.session = f"I{n}"
+            e.project = e.project or f"імпорт {source}"
+        imported.extend(found)
+        sources[source] += len(found)
+
+    if not sessions and not imported:
         _out({"error": "no_sessions", "period_days": a.days,
               "searched_in": [str(p) for p in claude_code.projects_dirs(a.dir)]})
         return
 
-    exchanges = claude_code.load_sessions([s.path for s in sessions], since=cutoff)
+    exchanges = claude_code.load_sessions([s.path for s in sessions], since=cutoff) + imported
 
     # Відкидаємо останні хвилини: це сама розмова, у якій запущено аудит
     recent = now - timedelta(minutes=a.skip_recent_minutes)
@@ -168,6 +185,7 @@ def cmd_collect(a) -> None:
         "prompt_chars_median": int(statistics.median(lengths)) if lengths else 0,
         "prompts_under_40_chars_pct": round(100 * sum(n < SHORT_PROMPT for n in lengths) / len(lengths)) if lengths else 0,
         "masked_fragments": masked,
+        **({"imported_exchanges": len(imported), "imported_from": dict(sources)} if a.add else {}),
         "reliable": len(exchanges) >= MIN_RELIABLE,
     }
     _remember_stats(stats)
@@ -290,6 +308,9 @@ def main() -> None:
     sc.add_argument("--days", type=int, default=30)
     sc.add_argument("--max", type=int, default=100, help="скільки діалогів у вибірці")
     sc.add_argument("--exclude", action="append", default=[], metavar="ПРОЄКТ", help="виключити проєкт (можна кілька разів)")
+    sc.add_argument("--add", action="append", default=[], metavar="ФАЙЛ",
+                    help="додати історію вручну: експорт ChatGPT, claude.ai, Gemini або .jsonl сесії Claude Code "
+                         "(можна кілька разів)")
     sc.add_argument("--skip-recent-minutes", type=int, default=10)
     sc.set_defaults(fn=cmd_collect)
 

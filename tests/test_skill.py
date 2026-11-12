@@ -101,6 +101,46 @@ class CliEndToEnd(unittest.TestCase):
         _, out, _ = self.run_cli("collect", "--days", "30")
         self.assertEqual(self.stats_of(out)["exchanges_in_sample"], 100)
 
+    def test_add_exported_history(self):
+        now = datetime.now(timezone.utc).timestamp()
+
+        def node(i, role, text, when, parent):
+            return {"message": {"author": {"role": role}, "content": {"parts": [text]}, "create_time": when},
+                    "parent": parent, "children": []}
+        chatgpt = [{"current_node": "n4", "mapping": {
+            "n1": node(1, "user", "ДАВНЄ-ПИТАННЯ з експорту", now - 400 * 86400, None),
+            "n2": node(2, "assistant", "давня відповідь", now - 400 * 86400, "n1"),
+            "n3": node(3, "user", f"СВІЖЕ-ПИТАННЯ з ключем {FAKE_KEY}", now - 3600, "n2"),
+            "n4": node(4, "assistant", "свіжа відповідь", now - 3500, "n3")}}]
+        claude_ai = [{"chat_messages": [{"sender": "human", "text": "ПИТАННЯ-З-CLAUDE-AI"},
+                                        {"sender": "assistant", "text": "відповідь"}]}]
+        f1, f2 = self.home / "conversations.json", self.home / "claude.json"
+        f1.write_text(json.dumps(chatgpt, ensure_ascii=False), encoding="utf-8")
+        f2.write_text(json.dumps(claude_ai, ensure_ascii=False), encoding="utf-8")
+
+        code, out, _ = self.run_cli("collect", "--days", "30", "--add", str(f1), "--add", str(f2))
+        self.assertEqual(code, 0, out)
+        stats = self.stats_of(out)
+        self.assertEqual(stats["imported_exchanges"], 2)
+        self.assertEqual(stats["imported_from"], {"ChatGPT": 1, "Claude": 1})
+        self.assertEqual(stats["exchanges_total"], 17)
+        self.assertIn("· сесія I1 · проєкт імпорт ChatGPT ---", out)
+        self.assertIn("СВІЖЕ-ПИТАННЯ", out)
+        self.assertNotIn("ДАВНЄ-ПИТАННЯ", out)                               # період діє й на експорт із датами
+        self.assertIn("ПИТАННЯ-З-CLAUDE-AI", out)                            # без дат — лишається
+        self.assertNotIn(FAKE_KEY, out)                                      # маскування діє й на імпорт
+
+        empty = Path(tempfile.mkdtemp())                                     # лише імпорт, без історії Claude Code
+        code, out, _ = self.run_cli("collect", "--add", str(f2), home=empty)
+        self.assertEqual((code, self.stats_of(out)["exchanges_total"]), (0, 1))
+
+        bad = self.home / "bad.txt"
+        bad.write_text("це не експорт", encoding="utf-8")
+        code, _, err = self.run_cli("collect", "--add", str(bad))
+        self.assertEqual(code, 2)
+        self.assertIn("bad.txt", err)
+        self.assertEqual(self.run_cli("collect", "--add", str(self.home / "нема.json"))[0], 2)
+
     def test_period_filter(self):
         _, out, _ = self.run_cli("collect", "--days", "30")
         self.assertTrue(self.stats_of(out)["reliable"])

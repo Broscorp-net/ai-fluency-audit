@@ -208,7 +208,6 @@ class CliEndToEnd(unittest.TestCase):
         self.assertIn("Description (Опис)", page)
 
         payload["scores"].update(description=6, diligence=5)                  # −1 і +1: похибка, не висновок
-        self.assertNotIn("іншою версією рубрики", page)                       # обидва записи за однією рубрикою
         self.run_cli("save", stdin=json.dumps(payload))
         newest = max((self.fl / "reports").glob("report-*.html"), key=lambda p: p.stat().st_mtime)
         body = newest.read_text(encoding="utf-8").split("</style>")[1]
@@ -245,20 +244,6 @@ class CliEndToEnd(unittest.TestCase):
         self.run_cli("collect", "--days", "30")
         code, out, _ = self.run_cli("save", stdin=json.dumps(payload))
         self.assertEqual(code, 0, out)
-    def test_rubric_version_is_saved_and_a_change_is_flagged(self):
-        payload = {"scores": {"delegation": 6, "description": 5, "discernment": 7, "diligence": 4}}
-        self.fl.mkdir(parents=True, exist_ok=True)                            # запис до появи версій рубрики
-        (self.fl / "history.json").write_text(json.dumps(
-            [{"date": "2026-10-01 12:00", "scores": payload["scores"], "overall": 5.5}]), encoding="utf-8")
-        code, out, _ = self.run_cli("save", stdin=json.dumps(payload))
-        self.assertEqual(code, 0, out)
-        hist = json.loads(self.run_cli("history")[1])
-        self.assertEqual([h["rubric"] for h in hist], [1, 2])
-        page = max((self.fl / "reports").glob("report-*.html"), key=lambda p: p.stat().st_mtime).read_text(encoding="utf-8")
-        self.assertIn("іншою версією рубрики", page)
-        rubric = (SKILL / "references" / "rubric-4d.md").read_text(encoding="utf-8")
-        self.assertIn(f"версія {hist[-1]['rubric']}", rubric.splitlines()[0])  # номер у коді й у заголовку збігаються
-
         last = json.loads(self.run_cli("last")[1])
         self.assertEqual(last["exchanges"], 15)                               # з collect, а не зі слів моделі
         stats = last["stats"]

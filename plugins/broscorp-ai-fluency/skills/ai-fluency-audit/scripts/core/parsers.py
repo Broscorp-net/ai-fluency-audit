@@ -236,12 +236,19 @@ def sample_exchanges(exchanges: list[Exchange], max_exchanges: int = 40) -> list
     return [exchanges[int(i * step)] for i in range(max_exchanges)]
 
 
-def format_for_analysis(exchanges: list[Exchange]) -> str:
-    """Format exchanges as readable text for the evaluator."""
+def format_for_analysis(exchanges: list[Exchange], with_project: bool = False) -> str:
+    """Format exchanges as readable text for the evaluator.
+
+    with_project=True додає назву проєкту в заголовок діалогу. Це лише для плагіна, де текст
+    не залишає машину; вебапка надсилає текст в API, тому назв проєктів не передає.
+    """
     lines = []
     for i, ex in enumerate(exchanges, 1):
-        # Мітка сесії показує оцінювачу структуру ітерацій (назви проєктів не передаємо)
-        header = f"--- Діалог {i}" + (f" · сесія {ex.session}" if ex.session else "") + " ---"
+        # Мітка сесії показує оцінювачу структуру ітерацій
+        header = f"--- Діалог {i}" + (f" · сесія {ex.session}" if ex.session else "")
+        if with_project and ex.project:
+            header += f" · проєкт {ex.project}"
+        header += " ---"
         lines.append(header)
         lines.append(f"[КОРИСТУВАЧ]: {ex.user[:600]}")
         if ex.tools:

@@ -90,7 +90,16 @@ class CliEndToEnd(unittest.TestCase):
         self.assertEqual(self.stats_of(out)["exchanges_total"], 12)
         self.assertNotIn("КЛІЄНТСЬКА-ЗАДАЧА", out)
         _, full, _ = self.run_cli("collect", "--days", "30")
-        self.assertNotIn("/work/", full.split("=== ДІАЛОГИ ===")[1])   # шляхи не потрапляють у текст діалогів
+        dialogs = full.split("=== ДІАЛОГИ ===")[1]
+        self.assertNotIn("/work/", dialogs)                             # шляхи не потрапляють у текст діалогів
+        self.assertIn("· проєкт app-a ---", dialogs)                    # назва проєкту — щоб описати діалог людині
+
+    def test_default_sample_is_100(self):
+        d = self.home / ".claude" / "projects" / "-work-big"
+        d.mkdir(parents=True)
+        (d / "s1.jsonl").write_text(_session([(f"Задача {i}", 300 + i) for i in range(150)], "/work/big"), encoding="utf-8")
+        _, out, _ = self.run_cli("collect", "--days", "30")
+        self.assertEqual(self.stats_of(out)["exchanges_in_sample"], 100)
 
     def test_period_filter(self):
         _, out, _ = self.run_cli("collect", "--days", "30")

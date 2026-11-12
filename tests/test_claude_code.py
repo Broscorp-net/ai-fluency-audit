@@ -86,6 +86,10 @@ class Formatting(unittest.TestCase):
         self.assertIn("[ПЕРЕРВАНО КОРИСТУВАЧЕМ]", text)
         self.assertNotIn("secret-client", text)  # назви проєктів у API не йдуть
 
+    def test_plugin_format_names_project(self):
+        text = format_for_analysis(cc.parse_records(SESSION, project="genius", session="S1"), with_project=True)
+        self.assertIn("· сесія S1 · проєкт genius ---", text)
+
     def test_chat_exports_unchanged(self):
         text = format_for_analysis([Exchange(user="привіт", assistant="вітаю")])
         self.assertEqual(text, "--- Діалог 1 ---\n[КОРИСТУВАЧ]: привіт\n[ШІ]: вітаю\n")

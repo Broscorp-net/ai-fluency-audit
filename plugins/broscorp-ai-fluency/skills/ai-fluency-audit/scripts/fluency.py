@@ -155,7 +155,7 @@ def cmd_collect(a) -> None:
 
     lengths = [len(e.user) for e in exchanges]
     sample = sample_exchanges(exchanges, a.max)
-    text, masked = redact(format_for_analysis(sample))
+    text, masked = redact(format_for_analysis(sample, with_project=True))
 
     stats = {
         "period_days": a.days,
@@ -288,7 +288,7 @@ def main() -> None:
 
     sc = sub.add_parser("collect")
     sc.add_argument("--days", type=int, default=30)
-    sc.add_argument("--max", type=int, default=40, help="скільки діалогів у вибірці")
+    sc.add_argument("--max", type=int, default=100, help="скільки діалогів у вибірці")
     sc.add_argument("--exclude", action="append", default=[], metavar="ПРОЄКТ", help="виключити проєкт (можна кілька разів)")
     sc.add_argument("--skip-recent-minutes", type=int, default=10)
     sc.set_defaults(fn=cmd_collect)

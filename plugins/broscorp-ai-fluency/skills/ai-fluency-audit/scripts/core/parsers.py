@@ -239,8 +239,8 @@ def sample_exchanges(exchanges: list[Exchange], max_exchanges: int = 40) -> list
 def format_for_analysis(exchanges: list[Exchange], with_project: bool = False) -> str:
     """Format exchanges as readable text for the evaluator.
 
-    with_project=True додає назву проєкту в заголовок діалогу. Це лише для плагіна, де текст
-    не залишає машину; вебапка надсилає текст в API, тому назв проєктів не передає.
+    with_project=True додає назву проєкту в заголовок діалогу, щоб оцінювач міг назвати
+    діалог зрозуміло для людини.
     """
     lines = []
     for i, ex in enumerate(exchanges, 1):

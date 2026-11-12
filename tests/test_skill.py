@@ -254,11 +254,6 @@ class CliEndToEnd(unittest.TestCase):
 
 
 class SkillPackage(unittest.TestCase):
-    def test_vendored_core_is_in_sync(self):
-        r = subprocess.run([sys.executable, str(ROOT / "tools" / "sync_skill.py"), "--check"],
-                           capture_output=True, timeout=30)
-        self.assertEqual(r.returncode, 0, "Запустіть: python tools/sync_skill.py\n" + r.stdout.decode("utf-8", "replace"))
-
     def test_no_network_or_process_code_in_skill_scripts(self):
         banned = {"socket", "urllib", "http", "requests", "ftplib", "smtplib", "ssl",
                   "telnetlib", "xmlrpc", "subprocess", "asyncio", "ctypes"}

@@ -94,10 +94,7 @@ Diligence): оцінки 1–10, патерни з прикладами, три 
 
 ## Для розробника
 
-Спільні модулі живуть у `core/` (їх використовує й Streamlit-апка). У скіл їх копіює
-`python tools/sync_skill.py` — скіл має бути самодостатнім. Копії в `skills/.../scripts/core/`
-руками не редагувати; тест `tests/test_skill.py` падає, якщо вони розійшлися з `core/`.
-Тести: `python -m unittest discover -s tests -t .`
+Увесь код скіла лежить у `skills/ai-fluency-audit/scripts/`; сторонніх пакетів він не потребує.
+Тести (з кореня репозиторію): `python -m unittest discover -s tests -t .`
 
-Рубрика оцінювання — `skills/ai-fluency-audit/references/rubric-4d.md`. Її критерії відповідають
-системному промпту в `core/evaluator.py` (апка); змінюючи одне, перевіряйте друге.
+Рубрика оцінювання — `skills/ai-fluency-audit/references/rubric-4d.md`.

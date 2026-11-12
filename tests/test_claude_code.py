@@ -1,9 +1,13 @@
 """Тести на синтетичних даних: python -m unittest discover -s tests -t ."""
 import json
+import sys
 import tempfile
 import unittest
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent
+                       / "plugins" / "broscorp-ai-fluency" / "skills" / "ai-fluency-audit" / "scripts"))
 
 from core import claude_code as cc
 from core.parsers import Exchange, auto_detect_and_parse, format_for_analysis
@@ -84,7 +88,7 @@ class Formatting(unittest.TestCase):
         self.assertIn("сесія S1", text)
         self.assertIn("[ДІЇ ШІ]: Edit×2, Bash", text)
         self.assertIn("[ПЕРЕРВАНО КОРИСТУВАЧЕМ]", text)
-        self.assertNotIn("secret-client", text)  # назви проєктів у API не йдуть
+        self.assertNotIn("secret-client", text)  # без with_project назви проєкту немає
 
     def test_plugin_format_names_project(self):
         text = format_for_analysis(cc.parse_records(SESSION, project="genius", session="S1"), with_project=True)
@@ -106,15 +110,14 @@ class Discovery(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             pdir = Path(tmp) / "projects" / "C--work-my-app"
             (pdir / "subagents").mkdir(parents=True)
-            body = "\n".join(json.dumps(r, ensure_ascii=False) for r in SESSION + [
-                {"type": "ai-title", "aiTitle": "Валідація форми", "sessionId": "s1"}])
+            body = "\n".join(json.dumps(r, ensure_ascii=False) for r in SESSION)
             (pdir / "s1.jsonl").write_text(body, encoding="utf-8")
             (pdir / "subagents" / "sub.jsonl").write_text(body, encoding="utf-8")  # не має підхопитись
 
             found = cc.discover_sessions(tmp)  # вказано корінь .claude → шукає /projects
             mine = [s for s in found if s.path.parent == pdir]
             self.assertEqual(len(mine), 1)
-            self.assertEqual((mine[0].project, mine[0].title), ("my-app", "Валідація форми"))
+            self.assertEqual(mine[0].project, "my-app")
 
             self.assertEqual(len(cc.load_sessions([mine[0].path])), 3)
 
@@ -127,9 +130,8 @@ class Discovery(unittest.TestCase):
             self.assertEqual(cc.load_sessions([p], since=since), [])
             self.assertEqual(len(cc.load_sessions([p])), 3)
 
-    def test_upload_and_autodetect(self):
+    def test_autodetect_claude_code_file(self):
         blob = "\n".join(json.dumps(r) for r in SESSION).encode("utf-8")
-        self.assertEqual(len(cc.parse_uploads([blob])), 3)
         exchanges, source = auto_detect_and_parse(blob)
         self.assertEqual((len(exchanges), source), (3, "Claude Code"))
 

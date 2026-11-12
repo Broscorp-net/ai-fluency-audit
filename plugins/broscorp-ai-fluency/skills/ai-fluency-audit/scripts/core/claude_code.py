@@ -63,13 +63,11 @@ def projects_dirs(extra: str | os.PathLike | None = None) -> list[Path]:
 class SessionInfo:
     path: Path
     project: str
-    title: str
     modified: datetime  # UTC, aware
-    size: int
 
 
 def discover_sessions(extra: str | os.PathLike | None = None) -> list[SessionInfo]:
-    """Список сесій (новіші першими). Читає лише початок/кінець файлів — швидко."""
+    """Список сесій (новіші першими). Читає лише початок файлів — швидко."""
     sessions: list[SessionInfo] = []
     for root in projects_dirs(extra):
         try:
@@ -84,13 +82,10 @@ def discover_sessions(extra: str | os.PathLike | None = None) -> list[SessionInf
                     continue
                 if st.st_size < 200:
                     continue
-                cwd, title = _peek(f)
                 sessions.append(SessionInfo(
                     path=f,
-                    project=project_label(cwd, pdir.name),
-                    title=title or f.stem[:8],
+                    project=project_label(_peek_cwd(f), pdir.name),
                     modified=datetime.fromtimestamp(st.st_mtime, tz=timezone.utc),
-                    size=st.st_size,
                 ))
     sessions.sort(key=lambda s: s.modified, reverse=True)
     return sessions
@@ -105,35 +100,18 @@ def project_label(cwd: str, fallback: str) -> str:
     return parts[-1] if parts else fallback
 
 
-def _peek(path: Path) -> tuple[str, str]:
-    """cwd (з початку файлу) і назва сесії (з кінця), не читаючи весь файл."""
-    chunk = 128 * 1024
+def _peek_cwd(path: Path) -> str:
+    """Робоча папка сесії з початку файлу, не читаючи його весь."""
     try:
-        size = path.stat().st_size
         with path.open("rb") as f:
-            head = f.read(chunk)
-            tail = b""
-            if size > len(head):
-                f.seek(max(len(head), size - chunk))
-                tail = f.read()
+            head = f.read(128 * 1024)
     except OSError:
-        return "", ""
-
-    cwd = ""
+        return ""
     for raw in head.splitlines():
         d = _loads(raw)
         if d and d.get("cwd"):
-            cwd = d["cwd"]
-            break
-
-    title = ""
-    for raw in reversed((tail or head).splitlines()):
-        d = _loads(raw)
-        if d and d.get("type") in ("custom-title", "ai-title"):
-            title = d.get("customTitle") or d.get("aiTitle") or ""
-            if title:
-                break
-    return cwd, title
+            return d["cwd"]
+    return ""
 
 
 # ── Розбір записів ───────────────────────────────────────────────────────────
@@ -273,16 +251,6 @@ def load_sessions(paths: Iterable[str | os.PathLike], since: datetime | None = N
         cwd = next((r["cwd"] for r in records if r.get("cwd")), "")
         project = project_label(cwd, Path(path).parent.name)
         result.extend(_since(parse_records(records, project=project, session=f"S{n}"), since))
-    return result
-
-
-def parse_uploads(blobs: Iterable[bytes], since: datetime | None = None) -> list[Exchange]:
-    """Те саме, але з завантажених вручну .jsonl файлів (коли застосунок не на вашому ПК)."""
-    result: list[Exchange] = []
-    for n, blob in enumerate(blobs, 1):
-        records = [d for d in (_loads(line) for line in blob.decode("utf-8", "replace").splitlines()) if d]
-        cwd = next((r["cwd"] for r in records if r.get("cwd")), "")
-        result.extend(_since(parse_records(records, project=project_label(cwd, ""), session=f"S{n}"), since))
     return result
 
 

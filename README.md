@@ -1,9 +1,11 @@
 # 4D AI Fluency Auditor
 
 Плагін для Claude Code, який оцінює вашу роботу зі штучним інтелектом за моделлю **4D** з
-[AI Fluency Framework](https://anthropic.skilljar.com/ai-fluency-framework-foundations).
-Цей фреймворк розробили Рік Дакан (Rick Dakan) і Джозеф Феллер (Joseph Feller) разом з Anthropic;
-він описує чотири навички, з яких складається вміла, відповідальна й безпечна співпраця людини зі ШІ:
+[AI Fluency Framework](https://aifluencyframework.org/).
+Цей фреймворк розробили професори Рік Дакан (Rick Dakan, Ringling College of Art and Design) і Джозеф Феллер
+(Joseph Feller, University College Cork); курси й перелік поведінкових індикаторів на його основі вони зробили
+разом з Anthropic. Фреймворк описує чотири навички, з яких складається вміла, відповідальна й безпечна
+співпраця людини зі ШІ:
 
 - **Delegation (Делегування)** — вирішити, що робити самому, що віддати ШІ, а що робити разом.
 - **Description (Опис)** — пояснити ШІ задачу, контекст і бажаний результат так, щоб він міг її виконати.
@@ -13,7 +15,10 @@
 Інструмент Broscorp читає вашу локальну історію Claude Code і повертає персональний відгук:
 оцінки 1–10 за кожним D, виявлені патерни, три поради з готовими шаблонами промптів і порівняння з минулим аудитом.
 
-Критерії оцінювання взято з Framework for AI Fluency v1.1 (Dakan & Feller) і внутрішнього гайда Broscorp.
+Критерії оцінювання: Framework for AI Fluency v1.1 (Dakan & Feller),
+[24 поведінкові індикатори Anthropic](https://academy.claude.com/tutorials/the-4-ds-of-ai-fluency-behavioral-indicators)
+і внутрішній гайд Broscorp. Повний перелік джерел — на початку
+[рубрики](plugins/broscorp-ai-fluency/skills/ai-fluency-audit/references/rubric-4d.md).
 Безкоштовний курс про сам фреймворк: [AI Fluency: Framework & Foundations](https://anthropic.skilljar.com/ai-fluency-framework-foundations).
 
 ## Плагін для Claude Code
@@ -54,3 +59,33 @@ python -m unittest discover -s tests -t .
 Історія чатів може містити код і дані клієнтів. Інструмент читає лише тексти промптів і відповідей ШІ
 (без вмісту файлів, виводу команд і вставленого з буфера тексту), автоматично маскує ключі, паролі
 й адреси e-mail та нічого не публікує. Імена людей маскування не ловить. Не аналізуйте історію з комерційною таємницею — це принцип Diligence.
+
+## Джерела
+
+Першоджерела з описом фреймворку:
+
+- Dakan R., Feller J. «Framework for AI Fluency (Practical Summary Document)», версія 1.1, 2025 —
+  https://ringling.libguides.com/ai/framework
+- Dakan R., Feller J. «The AI Fluency Framework: A Descriptive and Normative Model of Human-AI Interaction
+  for Higher Education», версія 1.1, Higher Education Authority, грудень 2025 —
+  https://hub.teachingandlearning.ie/wp-content/uploads/2025/12/hea-genai-fluency-framework.pdf
+- Сайт авторів фреймворку — https://aifluencyframework.org/
+- «The 4 Ds of AI Fluency — Behavioral Indicators», Claude Academy: перелік 24 поведінкових індикаторів —
+  https://academy.claude.com/tutorials/the-4-ds-of-ai-fluency-behavioral-indicators
+
+Матеріали, побудовані на фреймворку:
+
+- Swanson K. та ін. «Anthropic Education Report: The AI Fluency Index», 23.02.2026 —
+  https://www.anthropic.com/research/AI-fluency-index
+- Swanson K. та ін. «Anthropic Education Report: How people check Claude's work», 10.09.2026 —
+  https://academy.claude.com/tutorials/discernment-toolkit
+- «Getting good at Claude: A research-backed curriculum» —
+  https://academy.claude.com/tutorials/getting-good-at-claude-a-research-backed-curriculum
+- «Writing an AI diligence statement» — https://academy.claude.com/tutorials/writing-an-ai-diligence-statement
+- «A discussion guide for the AI Fluency Index» —
+  https://academy.claude.com/tutorials/a-discussion-guide-for-the-ai-fluency-index
+- Скіл Anthropic `discernment-nudge` —
+  https://raw.githubusercontent.com/anthropics/skills/refs/heads/main/skills/discernment-nudge/SKILL.md
+- Курс «AI Fluency: Framework and foundations» — https://academy.claude.com/courses/ai-fluency-framework-foundations
+- Курс «AI Fluency for builders» — https://academy.claude.com/courses/ai-fluency-for-builders
+- Potts C., Sudhof M. «A paradox of AI fluency», 2026 — https://arxiv.org/abs/2604.25905

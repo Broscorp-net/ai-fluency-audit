@@ -19,6 +19,9 @@ SKILL = PLUGIN / "skills" / "ai-fluency-audit"
 FLUENCY = SKILL / "scripts" / "fluency.py"
 FAKE_KEY = "sk-ant-api03-" + "Q" * 30
 
+sys.path.insert(0, str(SKILL / "scripts"))
+from core import indicators  # noqa: E402
+
 
 def _iso(minutes_ago: float) -> str:
     return (datetime.now(timezone.utc) - timedelta(minutes=minutes_ago)).isoformat()
@@ -37,6 +40,11 @@ def _session(prompts: list[tuple[str, float]], cwd: str) -> str:
 
 
 class CliEndToEnd(unittest.TestCase):
+    """
+    У вибірці 15 діалогів: №1–3 — проєкт secret-client (найстаріші), №4–15 — проєкт app-a
+    (діалог №4 містить секрет). Решта діалогів порядок не змінює.
+    """
+
     def setUp(self):
         self.home = Path(tempfile.mkdtemp())
         self.fl = self.home / "fl"
@@ -52,6 +60,8 @@ class CliEndToEnd(unittest.TestCase):
             d.mkdir(parents=True)
             (d / "s1.jsonl").write_text(_session(prompts, cwd), encoding="utf-8")
 
+    # ── допоміжне ────────────────────────────────────────────────────────────
+
     def run_cli(self, *args, stdin: str | None = None, home: Path | None = None):
         home = home or self.home
         env = {**os.environ, "HOME": str(home), "USERPROFILE": str(home),
@@ -63,6 +73,43 @@ class CliEndToEnd(unittest.TestCase):
     @staticmethod
     def stats_of(stdout: str) -> dict:
         return json.loads(stdout.split("=== STATS ===")[1].split("=== ДІАЛОГИ ===")[0])
+
+    def collect(self, *extra) -> str:
+        code, out, err = self.run_cli("collect", "--days", "30", *extra)
+        self.assertEqual(code, 0, err)
+        return out
+
+    @staticmethod
+    def labels(n: int, marks: dict | None = None) -> dict:
+        return {str(i): (marks or {}).get(i, []) for i in range(1, n + 1)}
+
+    def add_history(self, count: int) -> None:
+        """Додає проєкт із count старими діалогами: вибірка стає досить великою для висновків про зміни."""
+        d = self.home / ".claude" / "projects" / "-work-big"
+        d.mkdir(parents=True, exist_ok=True)
+        (d / "s1.jsonl").write_text(_session([(f"Велика задача {i}", 300 + i) for i in range(count)], "/work/big"),
+                                    encoding="utf-8")
+
+    def audit(self, marks: dict | None = None, narrative: dict | None = None, date: str | None = None,
+              no_report: bool = False) -> tuple:
+        """collect → tally → save, як це робить скіл. Повертає (вивід tally, вивід save)."""
+        n = self.stats_of(self.collect())["exchanges_in_sample"]
+        dated = ["--date", date] if date else []
+        code, t_out, err = self.run_cli("tally", *dated, stdin=json.dumps(self.labels(n, marks)))
+        self.assertEqual((code, err), (0, ""), t_out)
+        code, s_out, err = self.run_cli("save", *dated, *(["--no-report"] if no_report else []),
+                                        stdin=json.dumps(narrative or {"summary": "ок"}))
+        self.assertEqual((code, err), (0, ""), s_out)
+        return t_out, s_out
+
+    def newest_report(self) -> str:
+        return max((self.fl / "reports").glob("report-*.html"), key=lambda p: p.stat().st_mtime).read_text(encoding="utf-8")
+
+    @staticmethod
+    def row_of(markdown: str, name: str) -> str:
+        return next(r for r in markdown.splitlines() if r.startswith(f"| {name}"))
+
+    # ── збір ─────────────────────────────────────────────────────────────────
 
     def test_projects_lists_both(self):
         code, out, _ = self.run_cli("projects", "--days", "30")
@@ -85,14 +132,13 @@ class CliEndToEnd(unittest.TestCase):
         _, out, _ = self.run_cli("collect", "--days", "30", "--skip-recent-minutes", "0")
         self.assertEqual(self.stats_of(out)["exchanges_total"], 13 + 3)
 
-    def test_exclude_project_case_insensitive_and_names_not_sent(self):
+    def test_exclude_project_case_insensitive(self):
         _, out, _ = self.run_cli("collect", "--days", "30", "--exclude", "SECRET-CLIENT")
         self.assertEqual(self.stats_of(out)["exchanges_total"], 12)
         self.assertNotIn("КЛІЄНТСЬКА-ЗАДАЧА", out)
         _, full, _ = self.run_cli("collect", "--days", "30")
-        dialogs = full.split("=== ДІАЛОГИ ===")[1]
-        self.assertNotIn("/work/", dialogs)                             # шляхи не потрапляють у текст діалогів
-        self.assertIn("· проєкт app-a ---", dialogs)                    # назва проєкту — щоб описати діалог людині
+        self.assertNotIn("/work/", full.split("=== ДІАЛОГИ ===")[1])   # шляхи не потрапляють у текст діалогів
+        self.assertIn("· проєкт secret-client ---", full)               # а назву проєкту оцінювач бачить, щоб назвати діалог
 
     def test_default_sample_is_100(self):
         d = self.home / ".claude" / "projects" / "-work-big"
@@ -149,37 +195,102 @@ class CliEndToEnd(unittest.TestCase):
         self.assertEqual(code, 0)
         self.assertEqual(json.loads(out)["error"], "no_sessions")
 
-    def test_save_last_history_roundtrip_with_unicode(self):
-        self.assertEqual(json.loads(self.run_cli("last")[1]), {})
-        payload = {"scores": {"delegation": 6, "description": 5, "discernment": 7, "diligence": 4},
-                   "period_days": 30, "exchanges": 15, "summary": "Загалом непогано, є що підтягнути",
-                   "patterns": ["п'ять патернів"], "strengths": ["с"], "gaps": ["г"]}
-        f = self.home / "res.json"
-        f.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
-        code, out, _ = self.run_cli("save", "--file", str(f))
-        self.assertEqual(code, 0, out)
-        last = json.loads(self.run_cli("last")[1])
-        self.assertEqual((last["overall"], last["summary"]), (5.5, "Загалом непогано, є що підтягнути"))
-        self.run_cli("save", stdin=json.dumps(payload))                      # stdin теж працює
-        hist = json.loads(self.run_cli("history")[1])
-        self.assertEqual(len(hist), 2)
-        self.assertEqual(hist[0]["delegation"], 6)
+    # ── розмітка → tally ─────────────────────────────────────────────────────
 
-    def test_save_writes_escaped_html_report_with_progress(self):
-        payload = {"scores": {"delegation": 6, "description": 5, "discernment": 7, "diligence": 4},
-                   "period_days": 30, "exchanges": 15, "dominant_mode": "Доповнення",
-                   "summary": "Підсумок <script>alert(1)</script>", "patterns": ["патерн & деталь"],
-                   "recommendations": [{"title": "Порада-один", "description": "чому",
-                                        "indicator": "перевіряє <твердження> ШІ", "source": "Джерело & Ко",
-                                        "source_url": "https://academy.claude.com/tutorials/discernment-toolkit",
-                                        "example_prompt": "Зроби <що саме>\nГотово, коли <критерій>"}]}
-        code, out, _ = self.run_cli("save", stdin=json.dumps(payload))
-        self.assertEqual(code, 0, out)
+    def test_tally_needs_a_fresh_collect(self):
+        code, _, err = self.run_cli("tally", stdin=json.dumps({"1": []}))
+        self.assertEqual(code, 2)
+        self.assertIn("collect", err)
+        self.collect()
+        state = self.fl / "last-collect.json"                                # збір старший за 12 годин не годиться
+        raw = json.loads(state.read_text(encoding="utf-8"))
+        raw["collected_at"] = (datetime.now(timezone.utc) - timedelta(hours=13)).isoformat()
+        state.write_text(json.dumps(raw), encoding="utf-8")
+        code, _, err = self.run_cli("tally", stdin=json.dumps(self.labels(15)))
+        self.assertEqual(code, 2)
+        self.assertIn("collect", err)
+
+    def test_tally_rejects_incomplete_or_invalid_labels(self):
+        self.collect()
+        full = self.labels(15)
+        cases = [
+            ({k: v for k, v in full.items() if int(k) not in (5, 6, 7)}, "5–7"),   # пропущені діалоги названо
+            ({**full, "3": ["Del9"]}, "невідомий індикатор"),
+            ({**full, "3": ["Del1!"]}, "тривожного сліду"),
+            ({**full, "99": []}, "у вибірці немає"),
+        ]
+        for raw, message in cases:
+            with self.subTest(message=message):
+                code, _, err = self.run_cli("tally", stdin=json.dumps(raw))
+                self.assertEqual(code, 2)
+                self.assertIn(message, err)
+        self.assertEqual(self.run_cli("tally", stdin="не json")[0], 2)
+        self.assertFalse((self.fl / "last-tally.json").exists())            # з поганою розміткою нічого не збережено
+
+    def test_tally_counts_projects_flags_and_gives_orientation(self):
+        self.collect()
+        marks = {1: ["Del1"], 4: ["Del1", "Des2"], 5: ["Del1"], 9: ["Dil1!"], 10: ["Dis1"]}
+        code, out, err = self.run_cli("tally", stdin=json.dumps({"labels": self.labels(15, marks)}))
+        self.assertEqual((code, err), (0, ""))
+        row = self.row_of(out, "Формулює мету до запиту")
+        self.assertIn("**3** з 15", row)
+        self.assertIn("20%", row)
+        cells = [c.strip() for c in row.strip("|").split("|")]
+        self.assertEqual(cells[4], "2")                                      # діалог 1 — secret-client, 4 і 5 — app-a
+        self.assertIn("Тривожних слідів 🔴: **1**", out)
+        orientation = out.split("=== ОРІЄНТИРИ")[1]
+        self.assertIn("Жодного разу не помічено:", orientation)
+        self.assertIn("Del2 —", orientation)
+        self.assertIn("Тривожні сліди 🔴: Dil1", orientation)
+        self.assertIn("Попередній аудит із частотами: немає", orientation)
+        self.assertNotIn("Було → зміна", out)
+
+    def test_save_requires_a_tally_and_consumes_it(self):
+        self.collect()
+        code, _, err = self.run_cli("save", stdin=json.dumps({"summary": "x"}))
+        self.assertEqual(code, 2)
+        self.assertIn("tally", err)
+        self.audit()
+        code, _, err = self.run_cli("save", stdin=json.dumps({"summary": "x"}))   # підрахунок уже використано
+        self.assertEqual(code, 2)
+        self.assertEqual(len(json.loads(self.run_cli("history")[1])), 1)
+
+    def test_save_takes_numbers_from_the_script_not_from_the_model(self):
+        forged = {"summary": "s", "scores": {"delegation": 10}, "overall": 10, "exchanges": 999, "period_days": 7,
+                  "frequency": {"sample_size": 1, "exchanges_total": 1, "indicators": {}}}
+        self.audit({1: ["Del1"]}, forged)
+        last = json.loads(self.run_cli("last")[1])
+        self.assertNotIn("scores", last)                                     # балів більше немає
+        self.assertNotIn("overall", last)
+        self.assertEqual((last["exchanges"], last["period_days"], last["rubric"]), (15, 30, 3))
+        self.assertEqual(last["frequency"]["sample_size"], 15)
+        self.assertEqual(last["frequency"]["indicators"]["Del1"]["dialogs"], 1)
+
+    def test_history_stores_counts_not_text_or_project_names(self):
+        self.audit({1: ["Del1"], 4: ["Des2"]}, {"summary": "s", "recommendations": [{"title": "ТІЛЬКИ-У-ЗВІТ"}]})
+        raw = (self.fl / "history.json").read_text(encoding="utf-8")
+        for leaked in ("secret-client", "app-a", "КЛІЄНТСЬКА", "ТІЛЬКИ-У-ЗВІТ"):
+            self.assertNotIn(leaked, raw)
+        last = json.loads(self.run_cli("last")[1])
+        self.assertEqual(last["frequency"]["indicators"]["Del1"]["projects"], 1)
+        self.assertEqual(last["stats"]["projects"], 2)                       # кількість, а не назви
+        self.assertEqual(last["stats"]["masked_fragments"], 1)
+
+    # ── HTML-звіт ────────────────────────────────────────────────────────────
+
+    def test_html_report_shows_frequencies_and_escapes_text(self):
+        narrative = {"dominant_mode": "Доповнення", "summary": "Підсумок <script>alert(1)</script>",
+                     "patterns": ["патерн & деталь"],
+                     "recommendations": [{"title": "Порада-один", "description": "чому",
+                                          "indicator": "перевіряє <твердження> ШІ", "source": "Джерело & Ко",
+                                          "source_url": "https://academy.claude.com/tutorials/discernment-toolkit",
+                                          "example_prompt": "Зроби <що саме>\nГотово, коли <критерій>"}]}
+        _, out = self.audit({1: ["Del1"], 4: ["Del1", "Dil1!"], 5: ["Del1"]}, narrative)
         reports = sorted((self.fl / "reports").glob("report-*.html"))
         self.assertEqual(len(reports), 1)
         self.assertIn(str(reports[0]), out)
         page = reports[0].read_text(encoding="utf-8")
-        self.assertNotIn("<script>alert", page)                               # текст із даних не стає тегом
+        self.assertNotIn("<script", page)                                    # у звіті немає скриптів, а текст із даних не стає тегом
         self.assertIn("&lt;script&gt;alert(1)&lt;/script&gt;", page)
         self.assertIn("патерн &amp; деталь", page)
         self.assertIn("Зроби &lt;що саме&gt;", page)
@@ -187,127 +298,121 @@ class CliEndToEnd(unittest.TestCase):
         self.assertIn('<a href="https://academy.claude.com/tutorials/discernment-toolkit"', page)
         self.assertIn("Джерело &amp; Ко</a>", page)
         self.assertIn("Доповнення", page)
-        self.assertNotIn("Прогрес", page)                                     # перший аудит — порівнювати ні з чим
-        self.assertIn("Історія аудитів", page)
+        self.assertIn("Частота поведінки", page)
+        self.assertIn("<b>3</b> з 15 · 20%", page)                            # Del1
+        self.assertIn("🔴 тривожних слідів: 1", page)
+        for gone in ("Score", "score-card", "overall"):                      # балів у звіті немає
+            self.assertNotIn(gone, page)
+        self.assertNotIn("Прогрес", page)                                    # перший аудит — порівнювати ні з чим
         self.assertIn("Це перший збережений аудит", page)
-        self.assertEqual(page.count('class="pt"'), 1)                         # одна точка на графіку
-        self.assertNotIn("<polyline", page)                                   # лінія — лише з двох точок
         last = json.loads(self.run_cli("last")[1])
         self.assertNotIn("recommendations", last)                            # поради в історію не пишуться
 
-        payload["scores"]["description"] = 7
-        self.run_cli("save", stdin=json.dumps(payload))
-        newest = max((self.fl / "reports").glob("report-*.html"), key=lambda p: p.stat().st_mtime)
-        page = newest.read_text(encoding="utf-8")
+    def test_html_zero_rows_distinguish_gaps_from_quiet_indicators(self):
+        self.audit({1: ["Del1"]})
+        page = self.newest_report()
+        self.assertIn('class="freq-row zero"', page)                         # ядро з нулем — «не помічено»
+        self.assertIn('class="freq-row quiet"', page)                        # ситуативний нуль — нейтральний
+        self.assertIn("не було нагоди або йде поза чатом", page)
+
+    def test_progress_marks_only_changes_beyond_noise(self):
+        self.add_history(40)                                                 # вибірка 55: досить для висновків
+        self.audit({i: ["Del1"] for i in range(1, 6)})                       # 5 з 55
+        t_out, _ = self.audit({i: ["Del1"] for i in range(1, 31)})           # 30 з 55: +45 п.п.
+        self.assertIn("Було → зміна", t_out)
+        self.assertIn("5 з 55 (9%) · ▲ +45 п.п. · помітна зміна", self.row_of(t_out, "Формулює мету до запиту"))
+        self.assertIn("Попередній аудит із частотами: 20", t_out)
+        page = self.newest_report()
         self.assertIn("Прогрес", page)
-        self.assertIn("▲ +2", page)
-        self.assertIn("помітна зміна", page)                                  # два бали — варто уваги
-        self.assertNotIn("іншою версією рубрики", page)                       # обидва записи за однією рубрикою
-        self.assertNotIn("у межах похибки", page.split("</style>")[1])
-        self.assertIn('id="trend-tip"', page)                                 # тултіпи з назвами ліній
-        self.assertIn("Description (Опис)", page)
+        self.assertIn("Помітні зміни частоти", page)
+        self.assertIn("▲ +45 п.п. · помітна зміна", page)
 
-        payload["scores"].update(description=6, diligence=5)                  # −1 і +1: похибка, не висновок
-        self.run_cli("save", stdin=json.dumps(payload))
-        newest = max((self.fl / "reports").glob("report-*.html"), key=lambda p: p.stat().st_mtime)
-        body = newest.read_text(encoding="utf-8").split("</style>")[1]
-        self.assertIn("Помітних змін порівняно з попереднім аудитом немає", body)
-        self.assertEqual(body.count("· у межах похибки"), 2)
-        self.assertNotIn("помітна зміна", body)
+        t_out, _ = self.audit({i: ["Del1"] for i in range(1, 34)})           # 33 з 55: +5 п.п. — похибка
+        self.assertIn("у межах похибки", self.row_of(t_out, "Формулює мету до запиту"))
+        body = self.newest_report().split("</style>")[1]
+        self.assertIn("Помітних змін частоти порівняно з попереднім аудитом немає", body)
+        self.assertNotIn("pill-up", body)
+        self.assertIn("Індикаторів, що змінилися в межах похибки: 1", body)
 
-        payload["scores"].update(diligence=6)                                 # другий +1 поспіль — тенденція
-        self.run_cli("save", stdin=json.dumps(payload))
-        newest = max((self.fl / "reports").glob("report-*.html"), key=lambda p: p.stat().st_mtime)
-        body = newest.read_text(encoding="utf-8").split("</style>")[1]
-        self.assertIn("Схоже на тенденцію", body)
-        self.assertIn("· тенденція", body)
-        self.assertIn("Зверніть увагу: Diligence.", body)
-        self.assertEqual(page.count('class="pt"'), 2)                         # обидва аудити на графіку
-        self.assertIn("<polyline", page)
+    def test_small_samples_never_report_notable_change(self):
+        self.audit({i: [] for i in range(1, 16)})                            # вибірка 15 < 20
+        t_out, _ = self.audit({i: ["Del1"] for i in range(1, 16)})           # 0% → 100%
+        row = self.row_of(t_out, "Формулює мету до запиту")
+        self.assertIn("у межах похибки", row)
+        self.assertNotIn("помітна зміна", t_out)
 
-    def test_rubric_version_is_saved_and_a_change_is_flagged(self):
-        payload = {"scores": {"delegation": 6, "description": 5, "discernment": 7, "diligence": 4}}
-        self.fl.mkdir(parents=True, exist_ok=True)                            # запис до появи версій рубрики
-        (self.fl / "history.json").write_text(json.dumps(
-            [{"date": "2026-10-01 12:00", "scores": payload["scores"], "overall": 5.5}]), encoding="utf-8")
-        code, out, _ = self.run_cli("save", stdin=json.dumps(payload))
-        self.assertEqual(code, 0, out)
+    def test_legacy_scored_history_is_tolerated(self):
+        self.fl.mkdir(parents=True)
+        legacy = {"date": "2026-10-01 12:00", "rubric": 2, "overall": 5.5,
+                  "scores": {"delegation": 6, "description": 5, "discernment": 7, "diligence": 4}}
+        junk = [legacy, "сміття", {"date": "2026-10-02", "scores": {"delegation": "x"}}]
+        (self.fl / "history.json").write_text(json.dumps(junk, ensure_ascii=False), encoding="utf-8")
+        t_out, _ = self.audit({1: ["Del1"]})
+        self.assertIn("Раніші аудити були за балами", t_out)
+        self.assertNotIn("Було → зміна", t_out)                              # порівнювати частоти з балами не можна
+        page = self.newest_report()
+        self.assertIn("Попередні аудити були за балами", page)
+        self.assertIn("аудит за старою рубрикою: оцінки балами, загалом 5.5", page)
+        rows = json.loads(self.run_cli("history")[1])
+        self.assertEqual((rows[0]["overall"], rows[0]["delegation"]), (5.5, 6))
+        self.assertEqual(rows[-1]["dialogs"], {"Del1": 1})
+
+    def test_save_with_date_inserts_chronologically(self):
+        self.audit({1: ["Del1"]}, no_report=True)                            # сьогодні
+        t_out, _ = self.audit({1: ["Des2"]}, date="2020-01-15")              # аудит за минулий період
         hist = json.loads(self.run_cli("history")[1])
-        self.assertEqual([h["rubric"] for h in hist], [1, 2])
-        page = max((self.fl / "reports").glob("report-*.html"), key=lambda p: p.stat().st_mtime).read_text(encoding="utf-8")
-        self.assertIn("іншою версією рубрики", page)
-        rubric = (SKILL / "references" / "rubric-4d.md").read_text(encoding="utf-8")
-        self.assertIn(f"версія {hist[-1]['rubric']}", rubric.splitlines()[0])  # номер у коді й у заголовку збігаються
+        self.assertTrue(hist[0]["date"].startswith("2020-01-15"))
+        self.assertEqual((hist[0]["dialogs"], hist[1]["dialogs"]), ({"Des2": 1}, {"Del1": 1}))
+        self.assertEqual(json.loads(self.run_cli("last")[1])["frequency"]["indicators"]["Del1"]["dialogs"], 1)
+        self.assertIn("Попередній аудит із частотами: немає", t_out)         # раніше 2020 нічого не було
+        page = self.newest_report()
+        self.assertNotIn("Прогрес", page)
+        self.assertEqual(page.count("<tr><td>20"), 1)                        # звіт за минуле не показує майбутніх аудитів
 
-    def test_collect_stats_reach_history_and_report(self):
-        payload = {"scores": {"delegation": 6, "description": 5, "discernment": 7, "diligence": 4}}
-        self.run_cli("collect", "--days", "30")
-        code, out, _ = self.run_cli("save", stdin=json.dumps(payload))
-        self.assertEqual(code, 0, out)
-        last = json.loads(self.run_cli("last")[1])
-        self.assertEqual(last["exchanges"], 15)                               # з collect, а не зі слів моделі
-        stats = last["stats"]
-        self.assertEqual(stats["projects"], 2)                                # кількість, а не назви проєктів
-        self.assertEqual(stats["exchanges_total"], 15)
-        self.assertEqual(stats["masked_fragments"], 1)
-        self.assertNotIn("secret-client", (self.fl / "history.json").read_text(encoding="utf-8"))
-        page = max((self.fl / "reports").glob("report-*.html"), key=lambda p: p.stat().st_mtime).read_text(encoding="utf-8")
-        self.assertIn('<details class="stats">', page)                        # під катом, згорнуто
+        self.collect()
+        self.run_cli("tally", stdin=json.dumps(self.labels(15)))
+        code, _, err = self.run_cli("save", "--date", "15.01.2020", stdin=json.dumps({"summary": "x"}))
+        self.assertEqual(code, 2)
+        self.assertIn("--date", err)
+
+    def test_stats_rules(self):
+        self.audit()
+        page = self.newest_report()
+        self.assertIn('<details class="stats">', page)                       # під катом, згорнуто
         self.assertNotIn("<details open", page)
         self.assertIn("Медіанна довжина промпту", page)
         self.assertNotIn("<th>Попередній</th>", page)
+        code, _, err = self.run_cli("tally", stdin=json.dumps(self.labels(15)))   # без нового collect числа не переносяться
+        self.assertEqual(code, 2)
 
-        self.run_cli("save", stdin=json.dumps(payload))                       # без нового collect числа не переносяться
-        self.assertNotIn("stats", json.loads(self.run_cli("last")[1]))
-        self.run_cli("collect", "--days", "30")
-        self.run_cli("save", "--date", "2020-01-01", stdin=json.dumps(payload))  # минулий період — чужі числа не беремо
+        self.collect()                                                       # минулий період — чужі числа не беремо
+        self.run_cli("tally", "--date", "2020-01-01", stdin=json.dumps(self.labels(15)))
+        self.run_cli("save", "--date", "2020-01-01", stdin=json.dumps({"summary": "x"}))
         self.assertNotIn("stats", json.loads(self.run_cli("history")[1])[0])
-        self.run_cli("save", stdin=json.dumps({**payload, "stats": {"sessions": 3, "prompt_chars_median": 55, "x": "y"}}))
-        self.assertEqual(json.loads(self.run_cli("last")[1])["stats"], {"sessions": 3, "prompt_chars_median": 55})
 
-    def test_save_with_date_inserts_chronologically(self):
-        def scores(v):
-            return json.dumps({"scores": {"delegation": v, "description": v, "discernment": v, "diligence": v}})
-        self.run_cli("save", "--no-report", stdin=scores(7))                              # сьогодні
-        code, out, _ = self.run_cli("save", "--date", "2020-01-15", stdin=scores(4))      # аудит за минулий період
-        self.assertEqual(code, 0, out)
-        hist = json.loads(self.run_cli("history")[1])
-        self.assertEqual([h["delegation"] for h in hist], [4, 7])
-        self.assertTrue(hist[0]["date"].startswith("2020-01-15"))
-        self.assertEqual(json.loads(self.run_cli("last")[1])["scores"]["delegation"], 7)
-        page = next((self.fl / "reports").glob("report-*.html")).read_text(encoding="utf-8")
-        self.assertEqual(page.count('class="pt"'), 1)                         # звіт за минуле не показує майбутніх аудитів
-        self.assertNotIn("Прогрес", page)
-        self.assertEqual(self.run_cli("save", "--date", "15.01.2020", stdin=scores(4))[0], 2)
+        self.collect()                                                       # явні stats мають пріоритет, зайве відсіюється
+        self.run_cli("tally", stdin=json.dumps(self.labels(15)))
+        self.run_cli("save", stdin=json.dumps({"stats": {"sessions": 3, "prompt_chars_median": 55, "x": "y"}}))
+        self.assertEqual(json.loads(self.run_cli("last")[1])["stats"], {"sessions": 3, "prompt_chars_median": 55})
 
     def test_report_survives_foreign_history_entries(self):
         self.fl.mkdir(parents=True)
         (self.fl / "history.json").write_text(json.dumps([{"date": "2026-01-01", "scores": {"delegation": "x"}}, "сміття"]),
                                               encoding="utf-8")
-        good = {"scores": {"delegation": 5, "description": 5, "discernment": 5, "diligence": 5}}
-        code, out, err = self.run_cli("save", stdin=json.dumps(good))
-        self.assertEqual((code, err), (0, ""))
-        page = next((self.fl / "reports").glob("report-*.html")).read_text(encoding="utf-8")
-        self.assertEqual(page.count('class="pt"'), 1)
+        self.audit()                                                         # audit() сам перевіряє, що stderr порожній
+        self.assertIn("Історія аудитів", self.newest_report())
 
     def test_save_no_report_flag(self):
-        good = {"scores": {"delegation": 5, "description": 5, "discernment": 5, "diligence": 5}}
-        code, out, _ = self.run_cli("save", "--no-report", stdin=json.dumps(good))
-        self.assertEqual(code, 0)
+        self.audit(no_report=True)
         self.assertFalse((self.fl / "reports").exists())
 
-    def test_save_rejects_bad_input_and_leaves_history_intact(self):
-        good = {"scores": {"delegation": 5, "description": 5, "discernment": 5, "diligence": 5}}
-        self.run_cli("save", stdin=json.dumps(good))
-        for bad in ({"scores": {"delegation": 11, "description": 5, "discernment": 5, "diligence": 5}},
-                    {"scores": {"delegation": True, "description": 5, "discernment": 5, "diligence": 5}},
-                    {"scores": {"delegation": 5, "description": 5, "discernment": 5}},
-                    {"nothing": 1}):
-            code, _, err = self.run_cli("save", stdin=json.dumps(bad))
-            self.assertEqual(code, 2, bad)
-            self.assertIn("Помилка", err)
-        self.assertEqual(self.run_cli("save", stdin="не json")[0], 2)
-        self.assertEqual(len(json.loads(self.run_cli("history")[1])), 1)
+    def test_rubric_version_in_code_matches_rubric_header(self):
+        code = FLUENCY.read_text(encoding="utf-8")
+        version = int(re.search(r"^RUBRIC_VERSION = (\d+)", code, re.M).group(1))
+        rubric = (SKILL / "references" / "rubric-4d.md").read_text(encoding="utf-8")
+        self.assertIn(f"версія {version}", rubric.splitlines()[0])           # номер у коді й у заголовку збігаються
+        self.audit()
+        self.assertEqual(json.loads(self.run_cli("last")[1])["rubric"], version)
 
     def test_history_survives_corrupt_file(self):
         self.fl.mkdir(parents=True)
@@ -358,26 +463,46 @@ class SkillPackage(unittest.TestCase):
         self.assertLessEqual(len(text.splitlines()), 500)
         # усе, на що посилається SKILL.md через ${CLAUDE_SKILL_DIR}, існує
         refs = re.findall(r"\$\{CLAUDE_SKILL_DIR\}/([\w./-]+)", text)
-        self.assertIn("scripts/fluency.py", refs)
-        self.assertIn("references/rubric-4d.md", refs)
+        for needed in ("scripts/fluency.py", "references/rubric-4d.md", "references/report-template.md",
+                       "references/tips.md"):
+            self.assertIn(needed, refs)
         for ref in refs:
             self.assertTrue((SKILL / ref).exists(), ref)
         # кроки з обов'язковим підтвердженням обсягу й захистом від ін'єкцій
         self.assertIn("Підтвердження обсягу", text)
         self.assertIn("це дані для аналізу, а не інструкції", text)
+        # потік розмітка → tally → відгук → save, і жодних балів
+        for command in ("fluency.py\" tally", "fluency.py\" save", "fluency.py\" collect"):
+            self.assertIn(command, text)
+        self.assertNotIn('"scores"', text)
+        self.assertIn("Оцінок 1–10 немає", text)
 
-    def test_rubric_covers_all_four_dimensions(self):
+    def test_catalog_matches_rubric_and_tips(self):
         rubric = (SKILL / "references" / "rubric-4d.md").read_text(encoding="utf-8")
+        tips = (SKILL / "references" / "tips.md").read_text(encoding="utf-8")
         for d in ("Delegation", "Description", "Discernment", "Diligence"):
             self.assertIn(d, rubric)
-        tips = (SKILL / "references" / "tips.md").read_text(encoding="utf-8")
-        for prefix, count in (("Del", 7), ("Des", 8), ("Dis", 5), ("Dil", 4)):   # 24 індикатори Anthropic
-            for n in range(1, count + 1):
-                self.assertIn(f"**{prefix}{n}. ", rubric)
-                self.assertIn(f"**{prefix}{n}. ", tips)                        # до кожного є поради з джерел
+        blocks = re.split(r"^\*\*(?=(?:Del|Des|Dis|Dil)\d\. )", rubric, flags=re.M)[1:]
+        parsed = {}
+        for block in blocks:
+            m = re.match(r"((?:Del|Des|Dis|Dil)\d)\. (.+?)\*\*(.*)", block)
+            parsed[m.group(1)] = (m.group(2).strip(), m.group(3), block)
+        self.assertEqual(set(parsed), {c.code for c in indicators.CATALOG})
+        for c in indicators.CATALOG:
+            name, marks, block = parsed[c.code]
+            self.assertEqual(name, c.name, f"{c.code}: назва в каталозі й у рубриці різна")
+            note = ("ситуативний" if "ситуативний" in marks else "рідко видно" if "рідко" in marks
+                    else "видно частково" if "частково" in marks else "")
+            self.assertEqual(c.note, note, f"{c.code}: позначка видимості розійшлася з рубрикою")
+            self.assertEqual(c.flag, "Тривожний слід" in block, f"{c.code}: тривожний слід у каталозі й рубриці різний")
+            self.assertIn(f"**{c.code}. ", tips, f"{c.code}: немає порад у tips.md")      # до кожного є поради з джерел
+
+    def test_template_has_no_scores_and_asks_for_frequency_flow(self):
         template = (SKILL / "references" / "report-template.md").read_text(encoding="utf-8")
-        for needle in ("Scorecard", "Прогрес", "шаблон промпту"):
+        for needle in ("Частота поведінки", "Динаміка", "шаблон промпту", "tally"):
             self.assertIn(needle.lower(), template.lower())
+        for gone in ("Scorecard", "Бал (1–10)", "Загалом: X.X"):
+            self.assertNotIn(gone, template)
 
 
 if __name__ == "__main__":

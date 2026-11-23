@@ -1,6 +1,7 @@
-"""Generates a standalone HTML report from 4D evaluation results."""
+"""Generates a standalone HTML report: how often each 4D behavioral indicator was seen. No scores."""
 import html
-import json
+
+from core import indicators
 
 COLORS = {
     "delegation": "#4A90D9",
@@ -31,287 +32,169 @@ UA_LABELS = {
 }
 
 
-def _score_color(score: int) -> str:
-    if score >= 8:
-        return "#27AE60"
-    if score >= 5:
-        return "#F39C12"
-    return "#E74C3C"
-
-
-def _score_label(score: int) -> str:
-    if score >= 8:
-        return "Відмінно"
-    if score >= 6:
-        return "Добре"
-    if score >= 4:
-        return "Задовільно"
-    return "Потребує розвитку"
-
-
 def _e(value) -> str:
     """Текст звіту походить з моделі й історії чатів — у HTML він потрапляє лише екранованим."""
     return html.escape(str(value))
 
 
-KEYS = ["delegation", "description", "discernment", "diligence"]
-NOISE = 1  # різниця до одного бала за окремим D — у межах похибки вибірки
+def _pct(d: int, n: int) -> int:
+    return round(100 * d / n)
 
 
-def _int_scores(entry) -> dict | None:
-    scores = entry.get("scores") if isinstance(entry, dict) else None
-    if not isinstance(scores, dict):
-        return None
-    if any(isinstance(scores.get(k), bool) or not isinstance(scores.get(k), int) for k in KEYS):
-        return None
-    return scores
+def _arrow(pp: int) -> str:
+    return "▲" if pp > 0 else "▼" if pp < 0 else "●"
 
 
-def _changes(scores: dict, previous, before_previous=None) -> list[dict]:
-    """
-    Зміна кожного D проти попереднього аудиту з оцінкою, чи варта вона уваги:
-      notable — від двох балів;
-      trend   — один бал, але в той самий бік, що й між двома попередніми аудитами;
-      noise   — один бал без підтвердження: може бути ефектом вибірки;
-      same    — без змін.
-    """
-    now, was, earlier = _int_scores({"scores": scores}), _int_scores(previous), _int_scores(before_previous)
-    if not now or not was:
-        return []
-    out = []
-    for key in KEYS:
-        diff = now[key] - was[key]
-        if diff == 0:
-            kind = "same"
-        elif abs(diff) > NOISE:
-            kind = "notable"
-        elif earlier and (was[key] - earlier[key]) * diff > 0:
-            kind = "trend"
-        else:
-            kind = "noise"
-        out.append({"key": key, "was": was[key], "now": now[key], "diff": diff, "kind": kind})
-    return out
+# ── частота поведінки ────────────────────────────────────────────────────────
 
-
-def _arrow(diff: float) -> str:
-    return "▲" if diff > 0 else "▼" if diff < 0 else "●"
-
-
-def _chip(c: dict) -> str:
-    tone = "same" if c["kind"] == "same" else "noise" if c["kind"] == "noise" else ("up" if c["diff"] > 0 else "down")
-    change = f" {_arrow(c['diff'])} {c['diff']:+d}" if c["diff"] else ""
-    return (
-        f'<span class="chip chip-{tone}">{ICONS[c["key"]]} {LABELS[c["key"]]} '
-        f'<b>{c["was"]} → {c["now"]}</b>{change}</span>'
-    )
-
-
-def _progress_html(changes: list[dict], overall: float, previous: dict | None, rubric_changed: bool = False) -> str:
-    if not changes:
+def _change_pill(ch: dict | None) -> str:
+    if not ch or ch["kind"] == "same":
         return ""
-    rubric_note = (
-        '<p class="chg-note">Попередній аудит оцінено за іншою версією рубрики, тому порівняння балів орієнтовне: '
-        "частина різниці може пояснюватися зміною критеріїв, а не вашої роботи.</p>"
-    ) if rubric_changed else ""
-    prev_overall = round(sum(c["was"] for c in changes) / len(changes), 1)
-    delta = round(overall - prev_overall, 1)
-    overall_line = (
-        f"Загальний бал: <b>{prev_overall} → {overall}</b> "
-        + (f"({_arrow(delta)} {delta:+.1f})" if delta else "(без змін)")
-    )
-    groups = {k: [c for c in changes if c["kind"] == k] for k in ("notable", "trend", "noise", "same")}
-    blocks = ""
-    if groups["notable"]:
-        blocks += (
-            '<div class="chg chg-notable"><div class="chg-title">Варто уваги — зміна на два бали й більше</div>'
-            + "".join(_chip(c) for c in groups["notable"]) + "</div>"
-        )
-    if groups["trend"]:
-        blocks += (
-            '<div class="chg chg-notable"><div class="chg-title">Схоже на тенденцію — другий аудит поспіль у той самий бік</div>'
-            + "".join(_chip(c) for c in groups["trend"]) + "</div>"
-        )
-    if groups["noise"]:
-        blocks += (
-            '<div class="chg chg-noise"><div class="chg-title">У межах похибки — зміна на один бал</div>'
-            + "".join(_chip(c) for c in groups["noise"])
-            + '<p class="chg-note">Один бал різниці за окремим показником ще не означає, що ви стали працювати краще чи гірше: '
-              "оцінка ставиться за вибіркою (кожен k-й діалог періоду), і інша вибірка могла б дати сусідній бал. "
-              "Якщо наступний аудит покаже зміну в той самий бік, це вже тенденція.</p></div>"
-        )
-    if groups["same"]:
-        blocks += (
-            '<div class="chg chg-same"><div class="chg-title">Без змін</div>'
-            + "".join(_chip(c) for c in groups["same"]) + "</div>"
-        )
-    if not groups["notable"] and not groups["trend"]:
-        verdict = "Помітних змін порівняно з попереднім аудитом немає."
+    if ch["kind"] == "noise":
+        return f'<span class="pill pill-noise">{_arrow(ch["pp"])} {ch["pp"]:+d} п.п. · у межах похибки</span>'
+    tone = "up" if ch["pp"] > 0 else "down"
+    return f'<span class="pill pill-{tone}">{_arrow(ch["pp"])} {ch["pp"]:+d} п.п. · помітна зміна</span>'
+
+
+def _freq_row(ind, s: dict, t: dict, color: str, ch: dict | None) -> str:
+    n, total = t["sample_size"], t["exchanges_total"]
+    d = s["dialogs"]
+    pct = _pct(d, n)
+    tag = f' <span class="tag">{_e(ind.note)}</span>' if ind.note else ""
+    cls = "freq-row" + (" zero" if d == 0 and not ind.quiet else "") + (" quiet" if d == 0 and ind.quiet else "")
+    if d:
+        num = f"<b>{d}</b> з {n} · {pct}%"
     else:
-        names = ", ".join(LABELS[c["key"]] for c in groups["notable"] + groups["trend"])
-        verdict = f"Зверніть увагу: {names}."
-    since = f" · порівняно з аудитом {_e(str(previous['date'])[:10])}" if isinstance(previous, dict) and previous.get("date") else ""
+        num = "не було нагоди або йде поза чатом" if ind.quiet else "не помічено"
+    meta = []  # кожен елемент уже безпечний для вставки в HTML
+    if d:
+        if total > n:
+            meta.append(_e(f"≈ {indicators.estimate(t, ind.code)} за період"))
+        meta.append(_e("в одному проєкті" if s["projects"] == 1 else f"у {s['projects']} проєктах"))
+    if s["flags"]:
+        meta.append(f'<span class="flag">🔴 тривожних слідів: {s["flags"]}</span>')
+    meta_html = " · ".join(meta) + _change_pill(ch)
+    meta_div = f'<div class="freq-meta">{meta_html}</div>' if meta_html else ""
+    width = max(pct, 2) if d else 0
+    return f"""
+      <div class="{cls}">
+        <div class="freq-name">{_e(ind.name)}{tag}</div>
+        <div class="freq-bar"><span style="width:{width}%;background:{color}"></span></div>
+        <div class="freq-num">{num}</div>
+        {meta_div}
+      </div>"""
+
+
+def _freq_html(t: dict, changes: dict) -> str:
+    cov = indicators.coverage(t)
+    n, total = t["sample_size"], t["exchanges_total"]
+    summary = (
+        f"У вибірці <b>{_e(n)}</b> діалогів із {_e(total)} за період. Показано хоч в одному діалозі: "
+        f"<b>{cov['shown']} з {len(indicators.CATALOG)}</b> індикаторів; жодного разу не помічено: {cov['absent']} "
+        f"(з них ситуативних чи рідко видних: {cov['absent_quiet']})."
+        + (f' <span class="flag">🔴 Тривожних слідів: {cov["flags"]}</span>.' if cov["flags"] else "")
+    )
+    cards = ""
+    for key, _, _ in indicators.GROUPS:
+        rows = "".join(
+            _freq_row(ind, t["indicators"][ind.code], t, COLORS[key], changes.get(ind.code))
+            for ind in indicators.CATALOG if ind.dimension == key
+        )
+        cards += f"""
+    <div class="freq-card" style="--accent-d:{COLORS[key]}">
+      <div class="freq-title">{ICONS[key]} {LABELS[key]} <small>{UA_LABELS[key]}</small></div>{rows}
+    </div>"""
+    note = (
+        "Частота = діалоги з цією поведінкою / діалоги вибірки. Оцінок немає: звіт показує, як часто поведінка "
+        "зустрілася, а не наскільки це «добре». Нуль біля ситуативної чи рідко видної поведінки — не прогалина. "
+        + ("«За період» — оцінка (частка × усі діалоги періоду), а не точний підрахунок." if total > n else
+           "Вибірка охоплює весь період, тож числа точні.")
+    )
+    return f"""
+  <div class="section">
+    <div class="section-title">📊 Частота поведінки</div>
+    <p class="freq-summary">{summary}</p>{cards}
+    <p class="chg-note">{note}</p>
+  </div>"""
+
+
+# ── прогрес ──────────────────────────────────────────────────────────────────
+
+def _progress_html(t: dict, prev_freq: dict | None, previous: dict | None, rubric_changed: bool) -> str:
+    if not prev_freq:
+        if previous is not None:
+            return """
+  <div class="section">
+    <div class="section-title">📈 Прогрес</div>
+    <div class="change-box"><p class="chg-note">Попередні аудити були за балами: так оцінювали за старою версією рубрики,
+    а частоти поведінки тоді не рахувались. Порівняння з'явиться після наступного аудиту.</p></div>
+  </div>"""
+        return ""
+    changes = indicators.compare(t, prev_freq["frequency"])
+    notable = [(indicators.BY_CODE[c], ch) for c, ch in changes.items() if ch["kind"] == "notable"]
+    noise = sum(ch["kind"] == "noise" for ch in changes.values())
+    since = f" · порівняно з аудитом {_e(str(prev_freq.get('date', ''))[:10])}"
+    if notable:
+        chips = "".join(
+            f'<span class="chip chip-{"up" if ch["pp"] > 0 else "down"}">{_e(ind.name)} '
+            f'<b>{_pct(ch["was"], ch["was_n"])}% → {_pct(ch["now"], ch["now_n"])}%</b> {_arrow(ch["pp"])} {ch["pp"]:+d} п.п.</span>'
+            for ind, ch in sorted(notable, key=lambda x: -abs(x[1]["pp"]))
+        )
+        verdict = "Помітні зміни частоти (поза межами випадкової похибки вибірки):"
+        body = f'<div class="chg chg-notable"><div class="chg-title">Варто уваги</div>{chips}</div>'
+    else:
+        verdict = "Помітних змін частоти порівняно з попереднім аудитом немає."
+        body = ""
+    note = (
+        f'<p class="chg-note">Індикаторів, що змінилися в межах похибки: {noise}. Інша вибірка могла б показати й сусіднє число. '
+        "Порівнюються частки, а не сирі числа, бо вибірки двох аудитів можуть бути різного розміру. З 24 індикаторів "
+        "один-два можуть змінитися й випадково.</p>"
+    ) if noise else ""
+    rubric = (
+        '<p class="chg-note">Попередній аудит зроблено за іншою версією рубрики: частина різниці може пояснюватися '
+        "зміною критеріїв розмітки, а не вашої роботи.</p>"
+    ) if rubric_changed else ""
     return f"""
   <div class="section">
     <div class="section-title">📈 Прогрес{since}</div>
     <div class="change-box">
-      <p class="chg-verdict">{verdict} {overall_line}</p>
-      {rubric_note}
-      {blocks}
+      <p class="chg-verdict">{verdict}</p>{body}{note}{rubric}
     </div>
   </div>"""
 
 
-_TREND_JS = """
-(function () {
-  var svg = document.querySelector('svg.trend'), tip = document.getElementById('trend-tip');
-  var src = document.getElementById('trend-data');
-  if (!svg || !tip || !src) return;
-  var data = JSON.parse(src.textContent);
-  var groups = svg.querySelectorAll('g.series');
-
-  function segDist(px, py, a, b) {
-    var dx = b[0] - a[0], dy = b[1] - a[1], len = dx * dx + dy * dy;
-    var t = len ? Math.max(0, Math.min(1, ((px - a[0]) * dx + (py - a[1]) * dy) / len)) : 0;
-    return Math.hypot(px - (a[0] + t * dx), py - (a[1] + t * dy));
-  }
-  function lineDist(px, py, pts) {
-    if (pts.length === 1) return Math.hypot(px - pts[0][0], py - pts[0][1]);
-    var best = Infinity;
-    for (var i = 0; i < pts.length - 1; i++) best = Math.min(best, segDist(px, py, pts[i], pts[i + 1]));
-    return best;
-  }
-  function hide() {
-    tip.style.display = 'none';
-    for (var i = 0; i < groups.length; i++) groups[i].classList.remove('dim');
-  }
-  svg.addEventListener('mousemove', function (ev) {
-    var r = svg.getBoundingClientRect();
-    var x = (ev.clientX - r.left) * data.w / r.width, y = (ev.clientY - r.top) * data.h / r.height;
-    var ds = data.series.map(function (s) { return lineDist(x, y, s.pts); });
-    var min = Math.min.apply(null, ds);
-    if (min > 16) { hide(); return; }
-    var at = 0;  // найближчий аудит по горизонталі
-    data.series[0].pts.forEach(function (p, i) {
-      if (Math.abs(p[0] - x) < Math.abs(data.series[0].pts[at][0] - x)) at = i;
-    });
-    tip.textContent = '';
-    var head = document.createElement('div');
-    head.className = 'tip-date';
-    head.textContent = data.dates[at];
-    tip.appendChild(head);
-    data.series.forEach(function (s, i) {
-      var hit = ds[i] <= min + 4;  // лінії, що лежать одна на одній, показуються разом
-      groups[i].classList.toggle('dim', !hit);
-      if (!hit) return;
-      var row = document.createElement('div'), dot = document.createElement('i'), val = document.createElement('b');
-      dot.style.background = s.color;
-      val.textContent = ' ' + s.labels[at];
-      row.appendChild(dot);
-      row.appendChild(document.createTextNode(s.name));
-      row.appendChild(val);
-      tip.appendChild(row);
-    });
-    tip.style.display = 'block';
-    var left = ev.clientX + 16;
-    if (left + tip.offsetWidth > window.innerWidth - 8) left = ev.clientX - tip.offsetWidth - 16;
-    tip.style.left = left + 'px';
-    tip.style.top = (ev.clientY + 16) + 'px';
-  });
-  svg.addEventListener('mouseleave', hide);
-})();
-"""
-
-
-def _trend_svg(entries: list[dict]) -> str:
-    """Графік усіх аудитів: товста лінія — загальний бал, тонкі — кожен D. Шкала 0–10."""
-    keys = ["delegation", "description", "discernment", "diligence"]
-    w, h, left, right, top, bottom = 800, 300, 40, 40, 28, 40
-    pad = 48  # точки не притискаються до шкали, щоб підписи балів її не перекривали
-    step = (w - left - right - 2 * pad) / (len(entries) - 1) if len(entries) > 1 else 0
-
-    def xy(i: int, value: float) -> tuple[float, float]:
-        x = left + pad + i * step if step else (left + w - right) / 2
-        return x, top + (h - top - bottom) * (1 - value / 10)
-
-    def path(values: list) -> str:
-        return " ".join("{:.1f},{:.1f}".format(*xy(i, v)) for i, v in enumerate(values))
-
-    grid = "".join(
-        f'<line x1="{left}" y1="{xy(0, v)[1]:.1f}" x2="{w - right}" y2="{xy(0, v)[1]:.1f}" stroke="#2E3250"/>'
-        f'<text x="{left - 10}" y="{xy(0, v)[1] + 4:.1f}" text-anchor="end" fill="#8892B0" font-size="11">{v}</text>'
-        for v in (0, 2, 4, 6, 8, 10)
-    )
-    series = [
-        {"name": f"{LABELS[k]} ({UA_LABELS[k]})", "color": COLORS[k], "values": [e["scores"][k] for e in entries], "width": 2}
-        for k in keys
-    ] + [{"name": "Загальний бал", "color": "#E8EAF6", "values": [e["overall"] for e in entries], "width": 4}]
-    lines = ""
-    for n, sr in enumerate(series):
-        main = n == len(series) - 1
-        body = f"<title>{_e(sr['name'])}</title>"  # запасний тултіп, якщо скрипти вимкнено
-        if len(entries) > 1:
-            body += (
-                f'<polyline points="{path(sr["values"])}" fill="none" stroke="{sr["color"]}" '
-                f'stroke-width="{sr["width"]}" stroke-linejoin="round"/>'
-            )
-        for i, v in enumerate(sr["values"]):
-            x, y = xy(i, v)
-            if main:
-                body += f'<circle class="pt" cx="{x:.1f}" cy="{y:.1f}" r="6" fill="#E8EAF6" stroke="#0F1117" stroke-width="2"/>'
-            else:
-                body += f'<circle cx="{x:.1f}" cy="{y:.1f}" r="3.5" fill="{sr["color"]}"/>'
-        lines += f'<g class="series">{body}</g>'
-        sr["pts"] = [[round(c, 1) for c in xy(i, v)] for i, v in enumerate(sr["values"])]
-        sr["labels"] = [str(v) for v in sr["values"]]  # «7.0» лишається «7.0», а не стає «7» у JS
-    marks = ""
-    for i, e in enumerate(entries):
-        x, y = xy(i, e["overall"])
-        marks += (
-            f'<text x="{x:.1f}" y="{y - 13:.1f}" text-anchor="middle" fill="#E8EAF6" font-size="15" font-weight="800">{_e(e["overall"])}</text>'
-            f'<text x="{x:.1f}" y="{h - 14}" text-anchor="middle" fill="#8892B0" font-size="11">{_e(str(e.get("date", ""))[:10])}</text>'
-        )
-    legend = "".join(f'<span><i style="background:{COLORS[k]}"></i>{LABELS[k]}</span>' for k in keys)
-    data = json.dumps(
-        {"w": w, "h": h, "dates": [str(e.get("date", ""))[:10] for e in entries],
-         "series": [{k: sr[k] for k in ("name", "color", "labels", "pts")} for sr in series]},
-        ensure_ascii=False,
-    ).replace("<", "\\u003c")  # дати беруться з файлу історії — тег </script> не має закрити блок
-    return (
-        f'<svg class="trend" viewBox="0 0 {w} {h}" role="img" aria-label="Динаміка балів">{grid}{lines}{marks}</svg>'
-        f'<div class="trend-legend"><span><i style="background:#E8EAF6;height:4px"></i>Загалом</span>{legend}'
-        f'<span class="trend-hint">Наведіть курсор на лінію, щоб побачити її назву</span></div>'
-        f'<div id="trend-tip" class="trend-tip"></div>'
-        f'<script type="application/json" id="trend-data">{data}</script>'
-        f"<script>{_TREND_JS}</script>"
-    )
-
+# ── історія аудитів ──────────────────────────────────────────────────────────
 
 def _history_html(history: list | None, limit: int = 12) -> str:
-    """Графік усіх збережених аудитів (останні `limit`)."""
-    entries = []
+    rows = []
     for h in history or []:
-        scores = h.get("scores") if isinstance(h, dict) else None
-        if not isinstance(scores, dict) or any(
-            isinstance(scores.get(k), bool) or not isinstance(scores.get(k), (int, float)) for k in LABELS
-        ):
+        if not isinstance(h, dict):
+            continue
+        date = _e(str(h.get("date", ""))[:10])
+        f = h.get("frequency")
+        if indicators.valid_tally(f):
+            cov = indicators.coverage(f)
+            rows.append(f"<tr><td>{date}</td><td>{_e(f['exchanges_total'])}</td><td>{_e(f['sample_size'])}</td>"
+                        f"<td>{cov['shown']} з {len(indicators.CATALOG)}</td><td>{cov['flags'] or '—'}</td></tr>")
+        elif isinstance(h.get("scores"), dict):
+            overall = h.get("overall")
+            tail = f", загалом {_e(overall)}" if isinstance(overall, (int, float)) and not isinstance(overall, bool) else ""
+            rows.append(f'<tr><td>{date}</td><td colspan="4" class="muted">аудит за старою рубрикою: оцінки балами{tail}</td></tr>')
+        else:
             continue  # зіпсований або чужий запис не має ламати звіт
-        overall = h.get("overall")
-        if isinstance(overall, bool) or not isinstance(overall, (int, float)):
-            overall = round(sum(scores[k] for k in LABELS) / 4, 1)
-        entries.append({**h, "overall": overall})
-    if not entries:
+    if not rows:
         return ""
-    hidden = max(0, len(entries) - limit)
-    entries = entries[-limit:]
+    hidden = max(0, len(rows) - limit)
     note = ""
-    if len(entries) == 1:
-        note = '<p class="history-note">Це перший збережений аудит. Лінія динаміки з\'явиться після наступного.</p>'
+    if len(rows) == 1:
+        note = '<p class="history-note">Це перший збережений аудит. Порівняння частот з\'явиться після наступного.</p>'
     elif hidden:
         note = f'<p class="history-note">Показано останні {limit} аудитів; старіших ще {hidden}.</p>'
     return f"""
   <div class="section">
     <div class="section-title">🗓 Історія аудитів</div>
-    {_trend_svg(entries)}
+    <table class="stats-table history-table"><thead><tr><th>Дата</th><th>Діалогів за період</th><th>У вибірці</th><th>Показано індикаторів</th><th>🔴</th></tr></thead>
+    <tbody>{"".join(rows[-limit:])}</tbody></table>
     {note}
   </div>"""
 
@@ -338,7 +221,7 @@ def _stat_values(entry) -> dict:
 
 
 def _stats_html(result: dict, previous: dict | None) -> str:
-    """Згорнутий блок із числами збору. Це підказки для оцінювача, у бали вони не підставляються."""
+    """Згорнутий блок із числами збору. Це підказки для оцінювача, на розмітку діалогів вони не впливають."""
     now, before = _stat_values(result), _stat_values(previous)
     rows = [(label, unit, now[key], before.get(key)) for key, label, unit in STAT_ROWS if key in now]
     if not rows:
@@ -356,7 +239,7 @@ def _stats_html(result: dict, previous: dict | None) -> str:
     <summary>Статистика збору</summary>
     <table class="stats-table"><thead><tr>{head}</tr></thead><tbody>{body}</tbody></table>
     <div class="chg-note">Усі числа, крім розміру вибірки й замаскованих фрагментів, пораховано за всіма діалогами
-    періоду. Оцінювач бачить їх як підказку; у бали вони не підставляються.</div>
+    періоду. Оцінювач бачить їх як підказку; на розмітку діалогів вони не впливають.</div>
   </details>"""
 
 
@@ -376,55 +259,25 @@ def _rec_origin(rec: dict) -> str:
 
 def generate_html(result: dict, source: str, total_exchanges: int, previous: dict | None = None,
                   history: list | None = None) -> str:
-    scores = result.get("scores", {})
-    overall = round(sum(scores.values()) / len(scores), 1) if scores else 0
+    t = result.get("frequency")
+    if indicators.valid_tally(t):
+        # history закінчується поточним записом; усе до нього — попередні аудити
+        earlier = [h for h in (history or [])[:-1] if isinstance(h, dict)]
+        prev_freq = next((h for h in reversed(earlier) if indicators.valid_tally(h.get("frequency"))), None)
+        changes = indicators.compare(t, prev_freq["frequency"]) if prev_freq else {}
+        rubric_changed = bool(prev_freq) and result.get("rubric", 1) != prev_freq.get("rubric", 1)
+        freq_html = _freq_html(t, changes)
+        progress_html = _progress_html(t, prev_freq, previous, rubric_changed)
+        sample_meta = f'<div class="meta-item">У вибірці: <strong>{_e(t["sample_size"])}</strong></div>'
+    else:
+        freq_html = '<div class="section"><p class="chg-note">У цьому записі немає частот поведінки.</p></div>'
+        progress_html, sample_meta = "", ""
+    history_html = _history_html(history)
+    stats_html = _stats_html(result, previous)
 
-    valid = [h for h in (history or []) if _int_scores(h)]
-    before_previous = valid[-3] if len(valid) >= 3 and previous is not None else None
-    changes = _changes(scores, previous, before_previous)
-    delta_of = {c["key"]: c for c in changes}
-
-    score_cards = ""
-    for key in ["delegation", "description", "discernment", "diligence"]:
-        delta = ""
-        if key in delta_of and delta_of[key]["diff"]:
-            c = delta_of[key]
-            if c["kind"] == "noise":
-                delta = f'<div class="delta delta-noise">{_arrow(c["diff"])} {c["diff"]:+d} · у межах похибки</div>'
-            else:
-                tone = "up" if c["diff"] > 0 else "down"
-                label = "тенденція" if c["kind"] == "trend" else "помітна зміна"
-                delta = f'<div class="delta delta-{tone}">{_arrow(c["diff"])} {c["diff"]:+d} · {label}</div>'
-        score = scores.get(key, 0)
-        color = COLORS[key]
-        sc = _score_color(score)
-        pct = score * 10
-        score_cards += f"""
-        <div class="score-card">
-          <div class="score-icon">{ICONS[key]}</div>
-          <div class="score-label">{LABELS[key]}<br><small>{UA_LABELS[key]}</small></div>
-          <div class="score-ring" style="--pct:{pct};--color:{color};">
-            <span class="score-num" style="color:{sc}">{score}</span>
-          </div>
-          <div class="score-status" style="color:{sc}">{_score_label(score)}</div>
-          {delta}
-          <div class="score-bar-wrap">
-            <div class="score-bar" style="width:{pct}%;background:{color};"></div>
-          </div>
-        </div>"""
-
-    patterns_html = "".join(
-        f'<li class="pattern-item">📌 {_e(p)}</li>'
-        for p in result.get("patterns", [])
-    )
-    strengths_html = "".join(
-        f'<li class="strength-item">✅ {_e(s)}</li>'
-        for s in result.get("strengths", [])
-    )
-    gaps_html = "".join(
-        f'<li class="gap-item">⚠️ {_e(g)}</li>'
-        for g in result.get("gaps", [])
-    )
+    patterns_html = "".join(f'<li class="pattern-item">📌 {_e(p)}</li>' for p in result.get("patterns", []))
+    strengths_html = "".join(f'<li class="strength-item">✅ {_e(s)}</li>' for s in result.get("strengths", []))
+    gaps_html = "".join(f'<li class="gap-item">⚠️ {_e(g)}</li>' for g in result.get("gaps", []))
 
     recs_html = ""
     for i, rec in enumerate(result.get("recommendations", []), 1):
@@ -447,19 +300,13 @@ def generate_html(result: dict, source: str, total_exchanges: int, previous: dic
     summary = _e(result.get("summary", ""))
     source = _e(source)
     total_exchanges = _e(total_exchanges)
-    rubric_changed = isinstance(previous, dict) and result.get("rubric", 1) != previous.get("rubric", 1)
-    progress_html = _progress_html(changes, overall, previous, rubric_changed)
-    history_html = _history_html(history)
-    stats_html = _stats_html(result, previous)
-
-    overall_color = _score_color(int(overall))
 
     return f"""<!DOCTYPE html>
 <html lang="uk">
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>AI Fluency Report — 4D Analysis</title>
+<title>AI Fluency Report — частота поведінки 4D</title>
 <style>
   :root {{
     --bg: #0F1117;
@@ -482,29 +329,6 @@ def generate_html(result: dict, source: str, total_exchanges: int, previous: dic
   .meta-item {{ background: var(--surface); border: 1px solid var(--border); border-radius: 8px; padding: 8px 16px; font-size: 0.85rem; color: var(--muted); }}
   .meta-item strong {{ color: var(--text); }}
 
-  /* Overall score */
-  .overall {{ text-align: center; margin: 32px 0; }}
-  .overall-num {{ font-size: 5rem; font-weight: 800; color: {overall_color}; line-height: 1; }}
-  .overall-label {{ color: var(--muted); font-size: 0.9rem; margin-top: 4px; }}
-  .overall-status {{ font-size: 1.2rem; font-weight: 600; color: {overall_color}; margin-top: 8px; }}
-
-  /* Score cards */
-  .score-grid {{ display: grid; grid-template-columns: repeat(2, 1fr); gap: 16px; margin: 32px 0; }}
-  @media (max-width: 600px) {{ .score-grid {{ grid-template-columns: 1fr; }} }}
-  .score-card {{
-    background: var(--surface); border: 1px solid var(--border);
-    border-radius: 16px; padding: 20px 24px;
-    display: flex; flex-direction: column; gap: 10px;
-  }}
-  .score-icon {{ font-size: 1.6rem; }}
-  .score-label {{ font-size: 0.95rem; font-weight: 600; line-height: 1.4; }}
-  .score-label small {{ color: var(--muted); font-weight: 400; font-size: 0.8rem; }}
-  .score-num {{ font-size: 2.4rem; font-weight: 800; }}
-  .score-status {{ font-size: 0.8rem; font-weight: 600; }}
-  .score-bar-wrap {{ background: var(--surface2); border-radius: 4px; height: 6px; overflow: hidden; }}
-  .score-bar {{ height: 100%; border-radius: 4px; transition: width 0.3s; }}
-  .score-ring {{ display: inline-block; }}
-
   /* Sections */
   .section {{ margin: 32px 0; }}
   .section-title {{
@@ -520,6 +344,28 @@ def generate_html(result: dict, source: str, total_exchanges: int, previous: dic
   .strength-item {{ border-left: 3px solid #27AE60; }}
   .gap-item {{ border-left: 3px solid #E74C3C; }}
   .pattern-item {{ border-left: 3px solid var(--accent); }}
+
+  /* Frequency */
+  .freq-summary {{ font-size: 0.92rem; line-height: 1.7; margin-bottom: 16px; }}
+  .freq-card {{ background: var(--surface); border: 1px solid var(--border); border-top: 3px solid var(--accent-d); border-radius: 14px; padding: 16px 20px; margin-bottom: 16px; }}
+  .freq-title {{ font-size: 1rem; font-weight: 700; margin-bottom: 8px; }}
+  .freq-title small {{ color: var(--muted); font-weight: 400; margin-left: 6px; }}
+  .freq-row {{ display: grid; grid-template-columns: minmax(0, 2.2fr) minmax(0, 1.2fr) 12rem; gap: 4px 14px; align-items: center; padding: 9px 0; border-top: 1px solid var(--surface2); }}
+  .freq-name {{ font-size: 0.9rem; line-height: 1.4; }}
+  .freq-bar {{ background: var(--surface2); border-radius: 4px; height: 8px; overflow: hidden; }}
+  .freq-bar span {{ display: block; height: 100%; border-radius: 4px; }}
+  .freq-num {{ font-size: 0.88rem; text-align: right; line-height: 1.3; }}
+  .freq-meta {{ grid-column: 1 / -1; font-size: 0.78rem; color: var(--muted); }}
+  .freq-meta:empty {{ display: none; }}
+  .freq-row.zero .freq-num {{ color: #F0C040; }}
+  .freq-row.quiet .freq-name, .freq-row.quiet .freq-num {{ color: var(--muted); }}
+  .tag {{ font-size: 0.7rem; color: var(--muted); border: 1px solid var(--border); border-radius: 999px; padding: 1px 8px; margin-left: 6px; white-space: nowrap; }}
+  .flag {{ color: #F1948A; font-weight: 600; }}
+  .pill {{ display: inline-block; border-radius: 999px; padding: 1px 9px; margin-left: 6px; font-size: 0.74rem; font-weight: 600; border: 1px solid var(--border); }}
+  .pill-up {{ border-color: #27AE60; color: #6FD99B; }}
+  .pill-down {{ border-color: #E74C3C; color: #F1948A; }}
+  .pill-noise {{ color: var(--muted); font-weight: 400; }}
+  @media (max-width: 600px) {{ .freq-row {{ grid-template-columns: 1fr auto; }} .freq-bar {{ grid-column: 1 / -1; order: 3; }} }}
 
   /* Recommendation cards */
   .rec-card {{
@@ -553,22 +399,8 @@ def generate_html(result: dict, source: str, total_exchanges: int, previous: dic
   .chip {{ display: inline-block; background: var(--surface2); border: 1px solid var(--border); border-radius: 999px; padding: 5px 12px; margin: 0 8px 6px 0; font-size: 0.85rem; }}
   .chip-up {{ border-color: #27AE60; color: #6FD99B; }}
   .chip-down {{ border-color: #E74C3C; color: #F1948A; }}
-  .chip-noise, .chip-same {{ color: var(--muted); }}
-  .delta {{ font-size: 0.78rem; font-weight: 600; }}
-  .delta-up {{ color: #27AE60; }}
-  .delta-down {{ color: #E74C3C; }}
-  .delta-noise {{ color: var(--muted); font-weight: 400; }}
-  .trend g.series {{ transition: opacity 0.12s; }}
-  .trend g.series.dim {{ opacity: 0.15; }}
-  .trend-hint {{ margin-left: auto; font-style: italic; }}
-  .trend-tip {{ display: none; position: fixed; z-index: 10; pointer-events: none; background: #0B0D13; border: 1px solid var(--border); border-radius: 8px; padding: 8px 12px; font-size: 0.82rem; line-height: 1.7; box-shadow: 0 6px 20px rgba(0,0,0,0.5); }}
-  .trend-tip .tip-date {{ color: var(--muted); font-size: 0.75rem; }}
-  .trend-tip i {{ display: inline-block; width: 10px; height: 10px; border-radius: 50%; margin-right: 7px; }}
-
-  .trend {{ width: 100%; height: auto; background: var(--surface); border: 1px solid var(--border); border-radius: 12px; margin-bottom: 8px; }}
-  .trend-legend {{ display: flex; flex-wrap: wrap; gap: 14px; font-size: 0.8rem; color: var(--muted); margin-bottom: 14px; }}
-  .trend-legend i {{ display: inline-block; width: 14px; height: 3px; border-radius: 2px; margin-right: 6px; vertical-align: middle; }}
   .history-note {{ color: var(--muted); font-size: 0.85rem; margin-top: 10px; }}
+  .muted {{ color: var(--muted); }}
 
   .stats {{ background: var(--surface); border: 1px solid var(--border); border-radius: 12px; padding: 14px 20px; margin: 16px 0 32px; }}
   .stats summary {{ cursor: pointer; color: var(--muted); font-size: 0.9rem; font-weight: 600; }}
@@ -577,6 +409,7 @@ def generate_html(result: dict, source: str, total_exchanges: int, previous: dic
   .stats-table th {{ text-align: left; color: var(--muted); font-weight: 600; font-size: 0.78rem; padding: 6px 8px; border-bottom: 1px solid var(--border); }}
   .stats-table td {{ padding: 7px 8px; border-bottom: 1px solid var(--surface2); }}
   .stats-table td:not(:first-child), .stats-table th:not(:first-child) {{ text-align: right; white-space: nowrap; }}
+  .history-table td[colspan] {{ text-align: left; white-space: normal; }}
 
   /* Summary */
   .summary-box {{
@@ -601,22 +434,16 @@ def generate_html(result: dict, source: str, total_exchanges: int, previous: dic
 <div class="container">
 
   <div class="header">
-    <h1>🧠 AI Fluency Report</h1>
-    <div class="subtitle">Персональний аудит взаємодії зі штучним інтелектом</div>
+    <h1>🧠 AI Fluency: частота поведінки</h1>
+    <div class="subtitle">Скільки разів за період у вашій роботі зі ШІ проявилась кожна поведінка моделі 4D</div>
     <div class="meta">
       <div class="meta-item">Джерело: <strong>{source}</strong></div>
-      <div class="meta-item">Діалогів: <strong>{total_exchanges}</strong></div>
+      <div class="meta-item">Діалогів за період: <strong>{total_exchanges}</strong></div>
+      {sample_meta}
       <div class="meta-item">Режим: <strong>{dominant}</strong></div>
     </div>
   </div>
-
-  <div class="overall">
-    <div class="overall-num">{overall}</div>
-    <div class="overall-label">Загальний AI Fluency Score</div>
-    <div class="overall-status">{_score_label(int(overall))}</div>
-  </div>
-
-  <div class="score-grid">{score_cards}</div>
+{freq_html}
 {progress_html}
 {history_html}
 {stats_html}
@@ -627,12 +454,12 @@ def generate_html(result: dict, source: str, total_exchanges: int, previous: dic
   </div>
 
   <div class="section">
-    <div class="section-title">💪 Сильні сторони</div>
+    <div class="section-title">💪 Що трапляється часто</div>
     <ul class="items-list">{strengths_html}</ul>
   </div>
 
   <div class="section">
-    <div class="section-title">🚧 Зони розвитку</div>
+    <div class="section-title">🚧 Чого майже немає</div>
     <ul class="items-list">{gaps_html}</ul>
   </div>
 

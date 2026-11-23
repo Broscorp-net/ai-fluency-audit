@@ -5,10 +5,11 @@
 
 Команди:
   projects  — які проєкти/сесії є за період (без читання розмов)
-  collect   — підготувати замасковану вибірку діалогів + статистику для оцінки
+  collect   — підготувати замасковану вибірку діалогів + статистику для розмітки
+  tally     — перевірити розмітку діалогів і порахувати частоти індикаторів (JSON з --file або зі stdin)
   last      — попередній збережений результат (для порівняння прогресу)
   history   — усі збережені результати (динаміка)
-  save      — зберегти новий результат (JSON з --file або зі stdin) і скласти HTML-звіт
+  save      — зберегти відгук (JSON з --file або зі stdin) із підрахованими частотами і скласти HTML-звіт
 
 Нічого не відправляється в мережу: скрипт лише читає ~/.claude/projects
 і пише власну історію результатів у ~/.claude/ai-fluency/history.json
@@ -27,14 +28,13 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from core import claude_code, reporter  # noqa: E402
+from core import claude_code, indicators, reporter  # noqa: E402
 from core.parsers import PROMPT_LIMIT, auto_detect_and_parse, format_for_analysis, sample_exchanges  # noqa: E402
 from core.redact import redact  # noqa: E402
 
-DIMENSIONS = ("delegation", "description", "discernment", "diligence")
 MIN_RELIABLE = 10  # менше діалогів — оцінка ненадійна
 SHORT_PROMPT = 40  # символів
-RUBRIC_VERSION = 2  # версія references/rubric-4d.md; змінили критерії — підніміть і тут, і в заголовку рубрики
+RUBRIC_VERSION = 3  # версія references/rubric-4d.md; змінили критерії — підніміть і тут, і в заголовку рубрики
 # Числа з collect, які зберігаються в історії й показуються у звіті (без назв проєктів)
 STAT_KEYS = (
     "sessions", "projects", "exchanges_total", "exchanges_in_sample", "with_tool_actions",
@@ -79,8 +79,12 @@ def _clean_stats(raw) -> dict | None:
     return out or None
 
 
-def _remember_stats(stats: dict) -> None:
-    """collect лишає числа для save, щоб модель не переписувала їх руками."""
+def _remember_collect(stats: dict, sample_meta: list, period_days: int) -> None:
+    """
+    collect лишає на диску числа та метадані вибірки: числа йдуть у save без участі моделі,
+    а метадані (проєкт діалогу №i) потрібні tally, щоб порахувати, у скількох проєктах видно індикатор.
+    Назви проєктів лишаються лише в цьому тимчасовому файлі; в історію потрапляє їх кількість.
+    """
     clean = _clean_stats(stats)
     if not clean:
         return
@@ -88,20 +92,71 @@ def _remember_stats(stats: dict) -> None:
         path = _stats_file()
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(json.dumps(
-            {"collected_at": datetime.now(timezone.utc).isoformat(), **clean}), encoding="utf-8")
+            {"collected_at": datetime.now(timezone.utc).isoformat(), "period_days": period_days,
+             "sample": sample_meta, **clean}, ensure_ascii=False), encoding="utf-8")
     except OSError:
         pass  # статистика у звіті — додаткова; збір вибірки через неї не падає
 
 
-def _recent_stats() -> dict | None:
+def _fresh_json(path: Path, stamp: str) -> dict | None:
+    """Вміст службового файлу, якщо він свіжий (не старший за STATS_MAX_AGE_HOURS)."""
     try:
-        raw = json.loads(_stats_file().read_text(encoding="utf-8"))
-        age = datetime.now(timezone.utc) - datetime.fromisoformat(raw["collected_at"])
+        raw = json.loads(path.read_text(encoding="utf-8"))
+        age = datetime.now(timezone.utc) - datetime.fromisoformat(raw[stamp])
     except (OSError, ValueError, KeyError, TypeError):
         return None
-    if not timedelta(0) <= age <= timedelta(hours=STATS_MAX_AGE_HOURS):
+    if not isinstance(raw, dict) or not timedelta(0) <= age <= timedelta(hours=STATS_MAX_AGE_HOURS):
         return None
-    return _clean_stats(raw)
+    return raw
+
+
+def _recent_stats() -> dict | None:
+    raw = _fresh_json(_stats_file(), "collected_at")
+    return _clean_stats(raw) if raw else None
+
+
+def _recent_collect() -> dict | None:
+    raw = _fresh_json(_stats_file(), "collected_at")
+    if not raw or not isinstance(raw.get("sample"), list) or not raw["sample"]:
+        return None
+    if isinstance(raw.get("exchanges_total"), bool) or not isinstance(raw.get("exchanges_total"), int):
+        return None
+    return raw
+
+
+def _tally_file() -> Path:
+    return _home() / "last-tally.json"
+
+
+def _recent_tally() -> dict | None:
+    raw = _fresh_json(_tally_file(), "created_at")
+    return raw if raw and indicators.valid_tally(raw.get("tally")) else None
+
+
+def _position(history: list, when_text: str) -> int:
+    """Куди в історії стане запис із такою датою (за хронологією; типово — у кінець)."""
+    at = len(history)
+    while at and isinstance(history[at - 1], dict) and str(history[at - 1].get("date", "")) > when_text:
+        at -= 1
+    return at
+
+
+def _previous_with_frequency(history: list, at: int) -> dict | None:
+    """Найближчий попередній аудит (стоїть в історії до позиції `at`), у якому є частоти.
+    Старі аудити за балами пропускаємо: порівняти їх нема з чим."""
+    for h in reversed(history[:at]):
+        if isinstance(h, dict) and indicators.valid_tally(h.get("frequency")):
+            return h
+    return None
+
+
+def _parse_when(date_text: str | None) -> datetime:
+    if not date_text:
+        return datetime.now()
+    try:
+        return datetime.strptime(date_text, "%Y-%m-%d").replace(hour=12)
+    except ValueError:
+        _fail(f"--date має бути у форматі РРРР-ММ-ДД, отримано {date_text!r}")
 
 
 def _out(obj) -> None:
@@ -191,7 +246,9 @@ def cmd_collect(a) -> None:
         **({"imported_exchanges": len(imported), "imported_from": dict(sources)} if a.add else {}),
         "reliable": len(exchanges) >= MIN_RELIABLE,
     }
-    _remember_stats(stats)
+    # Метадані вибірки в тому ж порядку, що й нумерація діалогів у тексті нижче (№ = індекс + 1)
+    meta = [{"p": e.project, "d": str(e.timestamp)[:10], "s": e.session} for e in sample]
+    _remember_collect(stats, meta, a.days)
     print("=== STATS ===")
     _out(stats)
     print("=== ДІАЛОГИ ===")
@@ -199,19 +256,9 @@ def cmd_collect(a) -> None:
     print("=== КІНЕЦЬ ===")
 
 
-# ── last / history / save ────────────────────────────────────────────────────
+# ── tally / last / history / save ────────────────────────────────────────────
 
-def cmd_last(_a) -> None:
-    history = _load_history()
-    _out(history[-1] if history else {})
-
-
-def cmd_history(_a) -> None:
-    _out([{"date": h.get("date"), "overall": h.get("overall"), "rubric": h.get("rubric", 1), **h.get("scores", {})}
-          for h in _load_history()])
-
-
-def cmd_save(a) -> None:
+def _read_payload(a) -> dict:
     try:
         raw = Path(a.file).read_text(encoding="utf-8") if a.file else sys.stdin.read()
         data = json.loads(raw)
@@ -221,29 +268,85 @@ def cmd_save(a) -> None:
         _fail(f"на вході не валідний JSON: {e}")
     if not isinstance(data, dict):
         _fail("очікується JSON-обʼєкт")
+    return data
 
-    scores = data.get("scores")
-    if not isinstance(scores, dict):
-        _fail("немає поля scores")
-    for key in DIMENSIONS:
-        v = scores.get(key)
-        if isinstance(v, bool) or not isinstance(v, int) or not 1 <= v <= 10:
-            _fail(f"scores.{key} має бути цілим числом 1–10, отримано {v!r}")
 
-    when = datetime.now()
-    if a.date:  # аудит за минулий період: запис стає на своє місце за хронологією
-        try:
-            when = datetime.strptime(a.date, "%Y-%m-%d").replace(hour=12)
-        except ValueError:
-            _fail(f"--date має бути у форматі РРРР-ММ-ДД, отримано {a.date!r}")
+def cmd_tally(a) -> None:
+    """Перевіряє розмітку діалогів і рахує частоти. Числа далі йдуть у save без участі моделі."""
+    data = _read_payload(a)
+    state = _recent_collect()
+    if not state:
+        _fail(f"немає свіжих даних збору: спершу виконайте collect (його дані дійсні {STATS_MAX_AGE_HOURS} год)")
+    try:
+        labels = indicators.parse_labels(data, len(state["sample"]))
+    except ValueError as e:
+        _fail(str(e))
+    t = indicators.tally(labels, state["sample"], state["exchanges_total"])
+
+    history = _load_history()
+    at = _position(history, _parse_when(a.date).strftime("%Y-%m-%d %H:%M"))
+    prev = _previous_with_frequency(history, at)
+    try:
+        path = _tally_file()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(
+            {"created_at": datetime.now(timezone.utc).isoformat(), "period_days": state.get("period_days"), "tally": t},
+            ensure_ascii=False), encoding="utf-8")
+    except OSError as e:
+        _fail(f"не вдалося зберегти підрахунок: {e}")
+
+    print("=== ТАБЛИЦЯ ЧАСТОТ (вставте у відгук дослівно) ===")
+    print(indicators.render_markdown(t, prev["frequency"] if prev else None))
+    print("=== ОРІЄНТИРИ (підказка для відгуку, не вердикт) ===")
+    print(f"Попередній аудит із частотами: {prev['date'] if prev else 'немає'}")
+    if prev is None and history[:at]:
+        print("Раніші аудити були за балами: порівняння частот почнеться з наступного разу.")
+    found = indicators.signals(t)
+    for title, key in (("Жодного разу не помічено", "never_shown"), ("Рідко (до 5% діалогів)", "rarely_shown"),
+                       ("Часто (від 30% діалогів)", "frequently_shown"), ("Тривожні сліди 🔴", "red_flags")):
+        print(f"{title}: " + ("; ".join(found[key]) if found[key] else "—"))
+    print("=== КІНЕЦЬ ===")
+
+
+def cmd_last(_a) -> None:
+    history = _load_history()
+    _out(history[-1] if history else {})
+
+
+def cmd_history(_a) -> None:
+    rows = []
+    for h in _load_history():
+        if not isinstance(h, dict):
+            continue
+        row = {"date": h.get("date"), "rubric": h.get("rubric", 1)}
+        freq = h.get("frequency")
+        if indicators.valid_tally(freq):
+            cov = indicators.coverage(freq)
+            row.update(
+                exchanges=freq["exchanges_total"], sample=freq["sample_size"], shown=cov["shown"], red_flags=cov["flags"],
+                dialogs={c: s["dialogs"] for c, s in freq["indicators"].items() if s["dialogs"]},
+            )
+        else:  # аудит за старою рубрикою: оцінки балами
+            row.update(overall=h.get("overall"), **(h["scores"] if isinstance(h.get("scores"), dict) else {}))
+        rows.append(row)
+    _out(rows)
+
+
+def cmd_save(a) -> None:
+    data = _read_payload(a)
+    state = _recent_tally()
+    if not state:
+        _fail("немає свіжого підрахунку частот: спершу collect, потім розмітка діалогів і tally "
+              f"(їхні дані дійсні {STATS_MAX_AGE_HOURS} год)")
+    t = state["tally"]
+    when = _parse_when(a.date)  # аудит за минулий період: запис стає на своє місце за хронологією
 
     entry = {
         "date": when.strftime("%Y-%m-%d %H:%M"),
-        "scores": {k: scores[k] for k in DIMENSIONS},
-        "overall": round(sum(scores[k] for k in DIMENSIONS) / 4, 1),
         "rubric": RUBRIC_VERSION,
-        "period_days": data.get("period_days"),
-        "exchanges": data.get("exchanges"),
+        "period_days": state.get("period_days") or data.get("period_days"),
+        "exchanges": t["exchanges_total"],  # число з collect, а не зі слів моделі
+        "frequency": t,
         "summary": str(data.get("summary", ""))[:600],
         "patterns": [str(p)[:300] for p in data.get("patterns", [])][:6],
         "strengths": [str(p)[:300] for p in data.get("strengths", [])][:5],
@@ -255,14 +358,10 @@ def cmd_save(a) -> None:
     stats = _clean_stats(data.get("stats")) or (None if a.date else _recent_stats())
     if stats:
         entry["stats"] = stats
-        if stats.get("exchanges_total") is not None:
-            entry["exchanges"] = stats["exchanges_total"]  # число з collect, а не зі слів моделі
 
     path = _history_file()
     history = _load_history()
-    at = len(history)
-    while at and isinstance(history[at - 1], dict) and str(history[at - 1].get("date", "")) > entry["date"]:
-        at -= 1
+    at = _position(history, entry["date"])
     previous = history[at - 1] if at else None
     history.insert(at, entry)
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -270,8 +369,9 @@ def cmd_save(a) -> None:
     tmp.write_text(json.dumps(history, ensure_ascii=False, indent=2), encoding="utf-8")
     tmp.replace(path)
     print(f"Збережено ({at + 1}-й запис із {len(history)}) → {path}")
+    _tally_file().unlink(missing_ok=True)  # підрахунок використано; до наступного аудиту не переходить
     if stats and not data.get("stats"):
-        _stats_file().unlink(missing_ok=True)  # використано; до наступного аудиту не переходить
+        _stats_file().unlink(missing_ok=True)
 
     if a.no_report:
         return
@@ -285,7 +385,7 @@ def cmd_save(a) -> None:
     page = reporter.generate_html(
         {**entry, "recommendations": recs, "dominant_mode": str(data.get("dominant_mode", ""))[:60]},
         source=f"Claude Code{period}",
-        total_exchanges=entry["exchanges"] if entry["exchanges"] is not None else "—",
+        total_exchanges=entry["exchanges"],
         previous=previous,
         history=history[:at + 1],
     )
@@ -322,10 +422,15 @@ def main() -> None:
     sc.add_argument("--skip-recent-minutes", type=int, default=10)
     sc.set_defaults(fn=cmd_collect)
 
+    st = sub.add_parser("tally")
+    st.add_argument("--file", help="JSON-файл із розміткою діалогів (інакше читається stdin)")
+    st.add_argument("--date", metavar="РРРР-ММ-ДД", help="дата аудиту, якщо він за минулий період: від неї залежить, з яким аудитом порівнювати")
+    st.set_defaults(fn=cmd_tally)
+
     sub.add_parser("last").set_defaults(fn=cmd_last)
     sub.add_parser("history").set_defaults(fn=cmd_history)
     ss = sub.add_parser("save")
-    ss.add_argument("--file", help="JSON-файл із результатом (інакше читається stdin)")
+    ss.add_argument("--file", help="JSON-файл із відгуком (інакше читається stdin)")
     ss.add_argument("--no-report", action="store_true", help="не складати HTML-звіт")
     ss.add_argument("--date", metavar="РРРР-ММ-ДД", help="дата аудиту, якщо він за минулий період (типово — сьогодні)")
     ss.set_defaults(fn=cmd_save)

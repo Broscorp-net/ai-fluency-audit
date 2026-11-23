@@ -28,7 +28,7 @@
 Потрібен лише Python 3.9+.
 
 ```
-/plugin marketplace add Broscorp-net/4D-method-claude-plugin
+/plugin marketplace add Broscorp-net/ai-fluency-audit
 /plugin install broscorp-ai-fluency@broscorp-tools
 ```
 

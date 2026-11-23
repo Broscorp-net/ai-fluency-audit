@@ -10,7 +10,7 @@ Diligence): **частота кожної з 24 поведінок** (скіль
 Встановлення (один раз):
 
 ```
-/plugin marketplace add Broscorp-net/4D-method-claude-plugin
+/plugin marketplace add Broscorp-net/ai-fluency-audit
 /plugin install broscorp-ai-fluency@broscorp-tools
 ```
 
@@ -49,7 +49,7 @@ Diligence): **частота кожної з 24 поведінок** (скіль
 {
   "extraKnownMarketplaces": {
     "broscorp-tools": {
-      "source": { "source": "github", "repo": "Broscorp-net/4D-method-claude-plugin" },
+      "source": { "source": "github", "repo": "Broscorp-net/ai-fluency-audit" },
       "autoUpdate": true
     }
   },

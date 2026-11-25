@@ -28,6 +28,7 @@ class Exchange:
     session: str = ""
     project: str = ""
     timestamp: str = ""
+    opens_session: bool = False  # перша репліка сесії за період — підказка, що тут ставлять нову задачу
 
 
 def parse_chatgpt(data: list) -> list[Exchange]:
@@ -251,6 +252,29 @@ def sample_exchanges(exchanges: list[Exchange], max_exchanges: int = 40) -> list
     return [exchanges[int(i * step)] for i in range(max_exchanges)]
 
 
+def sample_with_openers(exchanges: list[Exchange], max_exchanges: int = 100) -> list[tuple[Exchange, float]]:
+    """
+    Вибірка, у якій початки сесій (там найчастіше ставлять нову задачу) представлено щедріше:
+    до половини місць — їм, решта — рівномірно з інших діалогів. Без цього нових задач у вибірці мало,
+    і частоти «у нових задачах» рахувались би з кількох діалогів.
+    Повертає [(діалог, вага)] у хронологічному порядку. Вага — скільки діалогів періоду представляє цей,
+    щоб оцінка «за весь період» не завищувалась через щедрішу вибірку початків.
+    """
+    if len(exchanges) <= max_exchanges:
+        return [(e, 1.0) for e in exchanges]
+    openers = [e for e in exchanges if e.opens_session]
+    rest = [e for e in exchanges if not e.opens_session]
+    q_open = min(len(openers), max_exchanges // 2)
+    q_rest = min(len(rest), max_exchanges - q_open)
+    q_open = min(len(openers), max_exchanges - q_rest)  # якщо інших діалогів мало — місця віддаємо початкам
+    picked_open = sample_exchanges(openers, q_open) if q_open else []
+    picked_rest = sample_exchanges(rest, q_rest) if q_rest else []
+    chosen = ([(e, len(openers) / len(picked_open)) for e in picked_open]
+              + [(e, len(rest) / len(picked_rest)) for e in picked_rest])
+    chosen.sort(key=lambda pair: pair[0].timestamp)
+    return chosen
+
+
 def format_for_analysis(exchanges: list[Exchange], with_project: bool = False) -> str:
     """Format exchanges as readable text for the evaluator.
 
@@ -263,6 +287,8 @@ def format_for_analysis(exchanges: list[Exchange], with_project: bool = False) -
         header = f"--- Діалог {i}" + (f" · сесія {ex.session}" if ex.session else "")
         if with_project and ex.project:
             header += f" · проєкт {ex.project}"
+        if ex.opens_session:
+            header += " · початок сесії"
         header += " ---"
         lines.append(header)
         lines.append(f"[КОРИСТУВАЧ]: {ex.user[:PROMPT_LIMIT]}")

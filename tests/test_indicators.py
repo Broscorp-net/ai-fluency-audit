@@ -8,10 +8,14 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent
 
 from core import indicators as ind  # noqa: E402
 
+BROSCORP = ("Des9", "Dil5", "Dil6")
+NEW, FOLLOW, QUICK = ind.NEW, ind.FOLLOW, ind.QUICK
 
-def empty_tally(n: int, total: int | None = None, **dialogs) -> dict:
-    """Лічильники без розмітки; dialogs={"Del1": 5, ...} задає кількість діалогів із індикатором."""
-    stats = {c.code: {"dialogs": 0, "flags": 0, "projects": 0} for c in ind.CATALOG}
+
+def empty_tally(n: int, total: int | None = None, codes=None, **dialogs) -> dict:
+    """Запис методу 1 (частки від усіх діалогів): dialogs={"Del1": 5, "Dil1!": 2}."""
+    codes = codes if codes is not None else [c.code for c in ind.CATALOG]
+    stats = {code: {"dialogs": 0, "flags": 0, "projects": 0} for code in codes}
     for code, d in dialogs.items():
         stats[code.rstrip("!")]["flags" if code.endswith("!") else "dialogs"] = d
         if not code.endswith("!"):
@@ -19,44 +23,63 @@ def empty_tally(n: int, total: int | None = None, **dialogs) -> dict:
     return {"sample_size": n, "exchanges_total": total if total is not None else n, "indicators": stats}
 
 
-class Catalog(unittest.TestCase):
-    def test_24_indicators_with_expected_split(self):
-        self.assertEqual(len(ind.CATALOG), 24)
-        self.assertEqual(len(ind.BY_CODE), 24)
-        counts = {d: sum(c.dimension == d for c in ind.CATALOG) for d in ind.DIMENSIONS}
-        self.assertEqual(counts, {"delegation": 7, "description": 8, "discernment": 5, "diligence": 4})
-        for c in ind.CATALOG:
-            self.assertTrue(c.code.startswith({"delegation": "Del", "description": "Des",
-                                               "discernment": "Dis", "diligence": "Dil"}[c.dimension]))
+def typed_tally(kinds: list, marks: dict | None = None, total: int | None = None, weights=None) -> dict:
+    """Запис методу 2 через справжній tally(): kinds[i] — тип діалогу №i+1, marks={№: [коди]}."""
+    labels = {i: (k, (marks or {}).get(i, [])) for i, k in enumerate(kinds, 1)}
+    meta = [{"p": "proj", "w": (weights[i] if weights else 1)} for i in range(len(kinds))]
+    return ind.tally(labels, meta, total if total is not None else len(kinds))
 
-    def test_flags_and_quiet_follow_the_rubric(self):
-        self.assertEqual({c.code for c in ind.CATALOG if c.flag}, {"Del3", "Dil1", "Dil2", "Dil3", "Dil4"})
-        self.assertEqual({c.code for c in ind.CATALOG if c.quiet}, {"Del3", "Des1", "Des3", "Dil2"})
+
+class Catalog(unittest.TestCase):
+    def test_24_anthropic_plus_3_broscorp(self):
+        self.assertEqual(len(ind.CATALOG), 27)
+        self.assertEqual(sum(c.origin == "anthropic" for c in ind.CATALOG), 24)
+        self.assertEqual({c.code for c in ind.CATALOG if c.origin == "broscorp"}, set(BROSCORP))
+        counts = {d: sum(c.dimension == d for c in ind.CATALOG) for d in ind.DIMENSIONS}
+        self.assertEqual(counts, {"delegation": 7, "description": 9, "discernment": 5, "diligence": 6})
+
+    def test_flags_and_quiet(self):
+        self.assertEqual({c.code for c in ind.CATALOG if c.flag},
+                         {"Del3", "Dil1", "Dil2", "Dil3", "Dil4", "Dil5", "Dil6"})
+        self.assertEqual({c.code for c in ind.CATALOG if c.quiet}, {"Del3", "Des1", "Des3", "Dil2", "Dil5", "Dil6"})
+
+    def test_every_indicator_has_applicability(self):
+        self.assertEqual(set(ind.APPLIES), set(ind.BY_CODE))
+        for c in ind.CATALOG:
+            self.assertTrue(c.applies and c.applies <= set(ind.TYPES), c.code)
+        self.assertEqual(ind.BY_CODE["Del1"].applies, {NEW})              # мету чекаємо в новій задачі
+        self.assertEqual(ind.BY_CODE["Dis1"].applies, {FOLLOW})           # оцінка відповіді — наступною реплікою
+        quick = {c.code for c in ind.CATALOG if QUICK in c.applies}
+        self.assertEqual(quick, {"Dil1"})                                 # у швидкому питанні — лише обережність із даними
 
 
 class ParseLabels(unittest.TestCase):
-    def test_normalizes_and_dedupes(self):
-        out = ind.parse_labels({"1": [" del1 ", "Del1", "dil1!"], "2": []}, 2)
-        self.assertEqual(out, {1: ["Del1", "Dil1!"], 2: []})
+    def test_reads_type_and_codes(self):
+        out = ind.parse_labels({"1": ["Нова", " del1 ", "Del1", "dil1!"], "2": ["питання"], "3": ["des9", "продовження"]}, 3)
+        self.assertEqual(out, {1: (NEW, ["Del1", "Dil1!"]), 2: (QUICK, []), 3: (FOLLOW, ["Des9"])})
 
     def test_accepts_labels_wrapper(self):
-        self.assertEqual(ind.parse_labels({"labels": {"1": ["Des2"]}}, 1), {1: ["Des2"]})
+        self.assertEqual(ind.parse_labels({"labels": {"1": ["нова", "Des2"]}}, 1), {1: (NEW, ["Des2"])})
 
-    def test_every_dialog_must_be_covered(self):
-        labels = {str(i): [] for i in (1, 2, 5, 6, 7, 10)}
+    def test_every_dialog_must_be_covered_and_typed(self):
+        labels = {str(i): ["продовження"] for i in (1, 2, 5, 6, 7, 10)}
         with self.assertRaises(ValueError) as cm:
             ind.parse_labels(labels, 10)
         self.assertIn("3–4, 8–9", str(cm.exception))
+        with self.assertRaises(ValueError) as cm:
+            ind.parse_labels({"1": ["Del1"], "2": [], "3": ["нова"]}, 3)
+        self.assertIn("немає типу діалогу в: 1–2", str(cm.exception))
 
     def test_rejects_bad_input_with_explanation(self):
         cases = [
-            ({"1": ["Del9"]}, "невідомий індикатор"),
-            ({"1": ["Del1!"]}, "тривожного сліду"),          # у Del1 його немає
-            ({"x": []}, "номером діалогу"),
-            ({"3": []}, "у вибірці немає"),
-            ({"0": []}, "у вибірці немає"),
-            ({"1": "Del1"}, "список кодів"),
-            (["Del1"], "JSON-обʼєкт"),
+            ({"1": ["нова", "Del9"]}, "невідомий індикатор"),
+            ({"1": ["нова", "Del1!"]}, "тривожного сліду"),          # у Del1 його немає
+            ({"1": ["нова", "Des9!"]}, "тривожного сліду"),
+            ({"1": ["нова", "питання"]}, "тип має бути один"),
+            ({"x": ["нова"]}, "номером діалогу"),
+            ({"3": ["нова"]}, "у вибірці немає"),
+            ({"1": "нова"}, "очікується список"),
+            (["нова"], "JSON-обʼєкт"),
         ]
         for raw, message in cases:
             with self.subTest(raw=raw), self.assertRaises(ValueError) as cm:
@@ -65,27 +88,61 @@ class ParseLabels(unittest.TestCase):
 
 
 class Tally(unittest.TestCase):
-    def test_counts_dialogs_flags_and_distinct_projects(self):
-        meta = [{"p": "a"}, {"p": "a"}, {"p": "b"}, {"p": ""}]
-        labels = {1: ["Del1"], 2: ["Del1", "Dil1!"], 3: ["Del1", "Dil1"], 4: ["Dil1!"]}
-        t = ind.tally(labels, meta, 40)
-        self.assertEqual(t["sample_size"], 4)
-        self.assertEqual(t["exchanges_total"], 40)
-        self.assertEqual(t["indicators"]["Del1"], {"dialogs": 3, "flags": 0, "projects": 2})
-        self.assertEqual(t["indicators"]["Dil1"], {"dialogs": 1, "flags": 2, "projects": 1})  # прапорці не рахуються як «показано»
-        self.assertEqual(t["indicators"]["Des1"], {"dialogs": 0, "flags": 0, "projects": 0})
+    def test_counts_against_applicable_dialogs(self):
+        # 2 нові задачі, 5 продовжень, 3 швидкі питання
+        kinds = [NEW, FOLLOW, FOLLOW, QUICK, NEW, FOLLOW, QUICK, FOLLOW, QUICK, FOLLOW]
+        t = typed_tally(kinds, {1: ["Del1", "Des9"], 2: ["Dis1"], 3: ["Dis1", "Dil1!"], 6: ["Del1"], 9: ["Dil1"]})
+        self.assertEqual(t["method"], ind.METHOD)
+        self.assertEqual(t["types"], {NEW: 2, FOLLOW: 5, QUICK: 3})
+        s = t["indicators"]
+        self.assertEqual((s["Dis1"]["dialogs"], s["Dis1"]["applicable"]), (2, 5))   # лише продовження
+        # мету видно в одній новій задачі й в одному продовженні: те продовження додається в знаменник
+        self.assertEqual((s["Del1"]["dialogs"], s["Del1"]["applicable"]), (2, 3))
+        self.assertEqual((s["Des9"]["dialogs"], s["Des9"]["applicable"]), (1, 2))
+        self.assertEqual((s["Dil1"]["dialogs"], s["Dil1"]["applicable"], s["Dil1"]["flags"]), (1, 10, 1))
+        self.assertAlmostEqual(ind.share(t, "Dis1"), 0.4)
         self.assertTrue(ind.valid_tally(t))
 
+    def test_quick_questions_do_not_dilute_task_indicators(self):
+        many_questions = [NEW] * 4 + [QUICK] * 40
+        t = typed_tally(many_questions, {1: ["Del1"], 2: ["Del1"], 3: ["Del1"]})
+        self.assertEqual(ind.share(t, "Del1"), 0.75)                      # 3 з 4 нових задач, а не 3 з 44
+
+    def test_estimate_uses_sample_weights(self):
+        kinds = [NEW, FOLLOW, FOLLOW]
+        t = typed_tally(kinds, {1: ["Del1"], 2: ["Dis1"], 3: ["Dis1"]}, total=21, weights=[1, 10, 10])
+        self.assertEqual((ind.estimate(t, "Del1"), ind.estimate(t, "Dis1")), (1, 20))
+
     def test_valid_tally_rejects_foreign_or_corrupt_data(self):
-        good = empty_tally(10)
+        good = typed_tally([NEW, FOLLOW], {1: ["Del1"]})
         self.assertTrue(ind.valid_tally(good))
+        self.assertTrue(ind.valid_tally(empty_tally(10)))                # запис методу 1 теж валідний
         broken = [None, "x", {}, {**good, "sample_size": 0}, {**good, "sample_size": True},
-                  {**good, "exchanges_total": -1}, {**good, "indicators": {}}]
-        bad_value = empty_tally(10)
-        bad_value["indicators"]["Del1"]["dialogs"] = "5"
-        broken.append(bad_value)
+                  {**good, "exchanges_total": -1}, {**good, "indicators": {}}, {**good, "method": 7}]
+        inconsistent = typed_tally([NEW], {1: ["Del1"]})
+        inconsistent["indicators"]["Del1"]["applicable"] = 0             # показано в 1, доречних 0 — неможливо
+        no_applicable = typed_tally([NEW])
+        del no_applicable["indicators"]["Del2"]["applicable"]
+        broken += [inconsistent, no_applicable]
         for obj in broken:
             self.assertFalse(ind.valid_tally(obj), obj)
+
+
+class OldRecordsStayUsable(unittest.TestCase):
+    def test_record_before_broscorp_indicators(self):
+        old = empty_tally(100, codes=[c.code for c in ind.CATALOG if c.code not in BROSCORP], Del1=10)
+        self.assertTrue(ind.valid_tally(old))
+        self.assertEqual(ind.coverage(old)["total"], 24)
+        ch = ind.compare(empty_tally(100, Del1=40, Des9=30), old)
+        self.assertEqual(ch["Del1"]["kind"], "notable")
+        self.assertNotIn("Des9", ch)
+
+    def test_methods_are_never_compared(self):
+        cur = typed_tally([NEW] * 30 + [FOLLOW] * 30, {i: ["Del1"] for i in range(1, 30)})
+        self.assertEqual(ind.compare(cur, empty_tally(100, Del1=5)), {})
+        s = ind.render_summary(cur, empty_tally(100, Del1=5), "2026-11-23")
+        self.assertIn("попередній аудит рахувався від усіх діалогів", s)
+        self.assertNotIn("Помітні зміни", s)
 
 
 class Compare(unittest.TestCase):
@@ -93,15 +150,12 @@ class Compare(unittest.TestCase):
         prev = empty_tally(100, Del1=0, Del2=20, Des2=20, Dis1=10)
         cur = empty_tally(100, Del1=30, Del2=25, Des2=20, Dis1=18)
         ch = ind.compare(cur, prev)
-        self.assertEqual(ch["Del1"]["kind"], "notable")     # 0% → 30%
-        self.assertEqual(ch["Del1"]["pp"], 30)
-        self.assertEqual(ch["Del2"]["kind"], "noise")       # +5 п.п.: менше за поріг
+        self.assertEqual((ch["Del1"]["kind"], ch["Del1"]["pp"]), ("notable", 30))
+        self.assertEqual(ch["Del2"]["kind"], "noise")
         self.assertEqual(ch["Des2"]["kind"], "same")
-        self.assertEqual(ch["Dis1"]["kind"], "noise")       # +8 п.п. < 10
-        self.assertEqual(ch["Des4"]["kind"], "same")        # 0 і 0
+        self.assertEqual(ch["Dis1"]["kind"], "noise")
 
     def test_the_same_difference_depends_on_sample_size(self):
-        # +15 п.п. і там, і там; на 20 діалогах це випадкове коливання, на 100 — ні (z ≈ 1,1 проти ≈ 2,4)
         small = ind.compare(empty_tally(20, Del1=7), empty_tally(20, Del1=4))["Del1"]
         large = ind.compare(empty_tally(100, Del1=35), empty_tally(100, Del1=20))["Del1"]
         self.assertEqual((small["pp"], large["pp"]), (15, 15))
@@ -112,72 +166,104 @@ class Compare(unittest.TestCase):
         self.assertEqual((ch["Des2"]["kind"], ch["Des2"]["pp"]), ("notable", -35))
 
     def test_compares_shares_not_raw_counts_across_sample_sizes(self):
-        ch = ind.compare(empty_tally(100, Del1=20), empty_tally(50, Del1=10))   # 20% і 20%, хоч 20 ≠ 10
+        ch = ind.compare(empty_tally(100, Del1=20), empty_tally(50, Del1=10))
         self.assertEqual(ch["Del1"]["kind"], "same")
 
     def test_tiny_samples_never_claim_significance(self):
-        ch = ind.compare(empty_tally(5, Del1=3), empty_tally(5, Del1=0))        # 60 п.п., але вибірка з 5
-        self.assertEqual(ch["Del1"]["kind"], "noise")
-        ch = ind.compare(empty_tally(100, Del1=60), empty_tally(19, Del1=0))     # одна з вибірок замала
-        self.assertEqual(ch["Del1"]["kind"], "noise")
+        self.assertEqual(ind.compare(empty_tally(5, Del1=3), empty_tally(5, Del1=0))["Del1"]["kind"], "noise")
+        self.assertEqual(ind.compare(empty_tally(100, Del1=60), empty_tally(19, Del1=0))["Del1"]["kind"], "noise")
+
+    def test_typed_audits_compare_against_applicable_dialogs(self):
+        prev = typed_tally([FOLLOW] * 40 + [QUICK] * 60, {i: ["Dis1"] for i in range(1, 5)})     # 4 з 40
+        cur = typed_tally([FOLLOW] * 40 + [QUICK] * 10, {i: ["Dis1"] for i in range(1, 25)})     # 24 з 40
+        ch = ind.compare(cur, prev)["Dis1"]
+        self.assertEqual((ch["was_n"], ch["now_n"], ch["pp"], ch["kind"]), (40, 40, 50, "notable"))
+        self.assertNotIn("Del1", ind.compare(cur, prev))                  # нових задач не було — порівнювати нічого
 
 
-class SignalsAndEstimate(unittest.TestCase):
-    def test_estimate_is_exact_when_sample_covers_period(self):
-        self.assertEqual(ind.estimate(empty_tally(40, 40, Del1=7), "Del1"), 7)
-        self.assertEqual(ind.estimate(empty_tally(100, 500, Del1=7), "Del1"), 35)
+class Summary(unittest.TestCase):
+    def test_typed_summary_shows_composition_and_scope(self):
+        kinds = [NEW] * 12 + [FOLLOW] * 41 + [QUICK] * 7
+        t = typed_tally(kinds, {**{i: ["Del1"] for i in range(1, 9)}, **{i: ["Des5"] for i in range(13, 33)}}, total=60)
+        s = ind.render_summary(t)
+        self.assertIn("(нових задач: 12, продовжень: 41, швидких питань: 7)", s)
+        self.assertIn("Формулює мету до запиту — **8** з 12 (67%) у нових задачах", s)
+        self.assertIn("Уточнює результат у наступних репліках — **20** з 41 (49%) у продовженнях", s)
+        rare = s.split("**⚠️ Рідко або ніколи**")[1].split("**📈")[0]
+        self.assertIn("у продовженнях", rare)                             # знаменник видно й тут
 
-    def test_signals_skip_quiet_indicators_and_use_thresholds(self):
-        t = empty_tally(100, Del1=40, Des2=3, Des1=0, Dil2=0, Del3=0)
-        t["indicators"]["Dil1"]["flags"] = 2
-        s = ind.signals(t)
-        self.assertTrue(any(x.startswith("Del1 ") for x in s["frequently_shown"]))
-        self.assertTrue(any(x.startswith("Des2 ") and "3 з 100" in x for x in s["rarely_shown"]))
-        never = " ".join(s["never_shown"])
-        for quiet in ("Des1", "Dil2", "Del3"):               # ситуативні й рідко видні нулі — не прогалина
-            self.assertNotIn(quiet, never)
-        self.assertIn("Del2 ", never)
-        self.assertEqual(len(s["red_flags"]), 1)
-        self.assertIn("Dil1", s["red_flags"][0])
-        self.assertIn("тривожних слідів 2", s["red_flags"][0])
+    def test_too_few_applicable_dialogs_are_not_rated(self):
+        t = typed_tally([NEW, NEW] + [FOLLOW] * 20, {i: ["Dis1"] for i in range(3, 13)})
+        often, rare = ind.often_and_rare(t)
+        names = {c.code for c in often + rare}
+        self.assertNotIn("Del1", names)                                   # 0 з 2 нових задач — висновку не робимо
+        self.assertIn("Dis1", names)
 
-    def test_coverage(self):
-        t = empty_tally(10, Del1=2, Des2=1)
-        t["indicators"]["Dil1"]["flags"] = 3
-        self.assertEqual(ind.coverage(t), {"shown": 2, "absent": 22, "absent_quiet": 4, "flags": 3})
+    def test_first_audit_lists_often_rare_and_says_it_is_first(self):
+        t = empty_tally(100, 400, Del1=31, Des5=40, Des2=12, Dis1=2, Des9=8)
+        s = ind.render_summary(t)
+        often = s.split("**✅ Найчастіше**")[1].split("**⚠️")[0]
+        self.assertLess(often.index("Уточнює результат"), often.index("Формулює мету"))
+        self.assertEqual(often.count("\n- "), ind.TOP_OFTEN)
+        rare = s.split("**⚠️ Рідко або ніколи**")[1].split("**📈")[0]
+        self.assertNotIn("Формулює мету", rare)
+        for quiet in ("Називає аудиторію", "Перевіряє на упередження", "Зважає на авторське право"):
+            self.assertNotIn(quiet, rare)
+        self.assertIn("…і ще", rare)
+        self.assertIn("це перший аудит із частотами", s)
+        self.assertNotIn("🔴", s)
+
+    def test_quiet_zeros_never_count_as_rare(self):
+        t = empty_tally(100, **{c.code: 50 for c in ind.CATALOG if not c.quiet})
+        rare = ind.render_summary(t).split("**⚠️ Рідко або ніколи**")[1].split("**📈")[0]
+        self.assertIn("- таких немає", rare)
+
+    def test_rare_puts_never_seen_first(self):
+        t = empty_tally(100, Dis1=2, Del1=50, Des2=50, Des4=50, Des5=50, Des6=50)
+        rare_lines = [l for l in ind.render_summary(t).split("**⚠️")[1].splitlines() if l.startswith("- ") and "**" in l]
+        self.assertTrue(all("**0**" in l for l in rare_lines))
+
+    def test_flags_and_changes(self):
+        cur = empty_tally(100, Del1=40, **{"Dil1!": 2, "Dil5!": 1})
+        s = ind.render_summary(cur, empty_tally(100, Del1=10), "2026-10-14")
+        self.assertIn("**🔴 Тривожні сліди: 3** — у темах «Зважає, якою інформацією ділиться з ШІ» ×2; "
+                      "«Перевіряє на упередження й стереотипи»", s)
+        self.assertIn("**📈 Помітні зміни з 2026-10-14:** Формулює мету до запиту 10% → 40% ▲", s)
+
+    def test_no_notable_change_and_scored_history(self):
+        self.assertIn("помітних змін немає", ind.render_summary(empty_tally(100, Del1=12), empty_tally(100, Del1=10), "x"))
+        self.assertIn("раніші аудити були за балами", ind.render_summary(empty_tally(100), earlier_scored=True))
+
+    def test_is_short(self):
+        kinds = [NEW] * 20 + [FOLLOW] * 70 + [QUICK] * 10
+        t = typed_tally(kinds, {1: ["Del1", "Dil1!"], 30: ["Dis1"]}, total=300)
+        s = ind.render_summary(t, typed_tally(kinds), "2026-10-14")
+        self.assertLessEqual(len(s.splitlines()), 18)
+        self.assertNotIn("|", s)
 
 
 class RenderMarkdown(unittest.TestCase):
-    def test_first_audit_has_no_comparison_column(self):
-        md = ind.render_markdown(empty_tally(100, 400, Del1=12))
-        for _, _, title in ind.GROUPS:
-            self.assertIn(title, md)
-        self.assertIn("**У вибірці 100 діалогів із 400 за період.**", md)
-        self.assertIn("За весь період", md)
-        row = next(r for r in md.splitlines() if r.startswith("| Формулює мету до запиту"))
-        self.assertIn("**12** з 100", row)
-        self.assertIn("12%", row)
-        self.assertIn("≈ 48", row)                              # 12% від 400
-        self.assertNotIn("Було → зміна", md)
-
-    def test_exact_period_shows_plain_counts(self):
-        md = ind.render_markdown(empty_tally(30, 30, Del1=4))
-        self.assertIn("| За період |", md)
-        self.assertNotIn("≈", md.split("*Частка")[0])
-
-    def test_comparison_column_marks_notable_changes_and_quiet_rows(self):
-        prev = empty_tally(100, Del1=0, Des2=20)
-        cur = empty_tally(100, Del1=30, Des2=21)
-        md = ind.render_markdown(cur, prev)
-        self.assertIn("Було → зміна", md)
+    def test_typed_table_shows_scope_and_applicable_denominator(self):
+        kinds = [NEW] * 4 + [FOLLOW] * 6
+        md = ind.render_markdown(typed_tally(kinds, {1: ["Del1"], 2: ["Del1"], 5: ["Dis1"]}))
         rows = {r.split("|")[1].strip(): r for r in md.splitlines() if r.startswith("| ")}
-        self.assertIn("▲ +30 п.п. · помітна зміна", rows["Формулює мету до запиту"])
-        self.assertIn("у межах похибки", rows["Задає формат, структуру й умову готовності"])
-        self.assertIn("Називає аудиторію результату (ситуативний)", rows)   # примітка видимості біля назви
+        self.assertIn("| нові задачі | **2** з 4 | 50% |", rows["Del1 · Формулює мету до запиту"])
+        self.assertIn("| продовження | **1** з 6 | 17% |", rows["Dis1 · Перевіряє факти й твердження, які мають значення"])
+        self.assertIn("| усі |", rows["Dil1 · Зважає, якою інформацією ділиться з ШІ"])
+
+    def test_no_applicable_dialogs_shows_dash_not_zero_percent(self):
+        md = ind.render_markdown(typed_tally([QUICK] * 5))
+        row = next(r for r in md.splitlines() if r.startswith("| Del1 · "))
+        self.assertIn("| **0** з 0 | — |", row)
+
+    def test_comparison_column(self):
+        md = ind.render_markdown(empty_tally(100, Del1=30, Des2=21), empty_tally(100, Del1=0, Des2=20))
+        rows = {r.split("|")[1].strip(): r for r in md.splitlines() if r.startswith("| ")}
+        self.assertIn("▲ +30 п.п. · помітна зміна", rows["Del1 · Формулює мету до запиту"])
+        self.assertIn("у межах похибки", rows["Des2 · Задає формат, структуру й умову готовності"])
 
     def test_red_flag_is_shown(self):
-        t = empty_tally(10, **{"Dil1!": 2})
-        self.assertIn("Тривожних слідів 🔴: **2**", ind.render_markdown(t))
+        self.assertIn("Тривожних слідів 🔴: **2**", ind.render_markdown(empty_tally(10, **{"Dil1!": 2})))
 
 
 if __name__ == "__main__":

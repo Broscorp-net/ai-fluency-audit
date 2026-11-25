@@ -29,7 +29,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from core import claude_code, indicators, reporter  # noqa: E402
-from core.parsers import PROMPT_LIMIT, auto_detect_and_parse, format_for_analysis, sample_exchanges  # noqa: E402
+from core.parsers import PROMPT_LIMIT, auto_detect_and_parse, format_for_analysis, sample_with_openers  # noqa: E402
 from core.redact import redact  # noqa: E402
 
 MIN_RELIABLE = 10  # менше діалогів — оцінка ненадійна
@@ -226,8 +226,16 @@ def cmd_collect(a) -> None:
     ]
     exchanges.sort(key=lambda e: e.timestamp)
 
+    # Перша репліка кожної сесії за період — підказка оцінювачу, що тут, найпевніше, ставлять нову задачу
+    started = set()
+    for e in exchanges:
+        if e.session not in started:
+            started.add(e.session)
+            e.opens_session = True
+
     lengths = [len(e.user) for e in exchanges]
-    sample = sample_exchanges(exchanges, a.max)
+    weighted = sample_with_openers(exchanges, a.max)
+    sample = [e for e, _ in weighted]
     text, _ = redact(format_for_analysis(sample, with_project=True))
     # Сигнал Diligence — лише те, що передала сама людина; маски у відповідях ШІ не рахуємо
     masked = sum(redact(e.user[:PROMPT_LIMIT])[1] for e in sample)
@@ -238,6 +246,7 @@ def cmd_collect(a) -> None:
         "projects": dict(Counter(s.project for s in sessions)),
         "exchanges_total": len(exchanges),
         "exchanges_in_sample": len(sample),
+        "session_starts_in_sample": sum(e.opens_session for e in sample),
         "with_tool_actions": sum(bool(e.tools) for e in exchanges),
         "interrupted_by_user": sum(e.interrupted for e in exchanges),
         "prompt_chars_median": int(statistics.median(lengths)) if lengths else 0,
@@ -247,7 +256,9 @@ def cmd_collect(a) -> None:
         "reliable": len(exchanges) >= MIN_RELIABLE,
     }
     # Метадані вибірки в тому ж порядку, що й нумерація діалогів у тексті нижче (№ = індекс + 1)
-    meta = [{"p": e.project, "d": str(e.timestamp)[:10], "s": e.session} for e in sample]
+    # Вага — скільки діалогів періоду представляє цей: потрібна для оцінки «за весь період»
+    meta = [{"p": e.project, "d": str(e.timestamp)[:10], "s": e.session, "o": e.opens_session, "w": round(w, 4)}
+            for e, w in weighted]
     _remember_collect(stats, meta, a.days)
     print("=== STATS ===")
     _out(stats)
@@ -295,16 +306,12 @@ def cmd_tally(a) -> None:
     except OSError as e:
         _fail(f"не вдалося зберегти підрахунок: {e}")
 
-    print("=== ТАБЛИЦЯ ЧАСТОТ (вставте у відгук дослівно) ===")
-    print(indicators.render_markdown(t, prev["frequency"] if prev else None))
-    print("=== ОРІЄНТИРИ (підказка для відгуку, не вердикт) ===")
-    print(f"Попередній аудит із частотами: {prev['date'] if prev else 'немає'}")
-    if prev is None and history[:at]:
-        print("Раніші аудити були за балами: порівняння частот почнеться з наступного разу.")
-    found = indicators.signals(t)
-    for title, key in (("Жодного разу не помічено", "never_shown"), ("Рідко (до 5% діалогів)", "rarely_shown"),
-                       ("Часто (від 30% діалогів)", "frequently_shown"), ("Тривожні сліди 🔴", "red_flags")):
-        print(f"{title}: " + ("; ".join(found[key]) if found[key] else "—"))
+    prev_freq = prev["frequency"] if prev else None
+    print("=== КОРОТКИЙ ПІДСУМОК (вставте у відгук дослівно) ===")
+    print(indicators.render_summary(t, prev_freq, str(prev.get("date", ""))[:10] if prev else "",
+                                    earlier_scored=prev is None and bool(history[:at])))
+    print("=== ПОВНА ТАБЛИЦЯ (лише для тебе: у відгук не вставляй, людина побачить її в HTML-звіті) ===")
+    print(indicators.render_markdown(t, prev_freq))
     print("=== КІНЕЦЬ ===")
 
 
@@ -347,10 +354,11 @@ def cmd_save(a) -> None:
         "period_days": state.get("period_days") or data.get("period_days"),
         "exchanges": t["exchanges_total"],  # число з collect, а не зі слів моделі
         "frequency": t,
-        "summary": str(data.get("summary", ""))[:600],
-        "patterns": [str(p)[:300] for p in data.get("patterns", [])][:6],
-        "strengths": [str(p)[:300] for p in data.get("strengths", [])][:5],
-        "gaps": [str(p)[:300] for p in data.get("gaps", [])][:5],
+        # Коротко за задумом: щомісячний огляд читають за хвилину, тож не більше трьох пунктів у кожному списку
+        "summary": str(data.get("summary", ""))[:400],
+        "patterns": [str(p)[:240] for p in data.get("patterns", [])][:3],
+        "strengths": [str(p)[:240] for p in data.get("strengths", [])][:3],
+        "gaps": [str(p)[:240] for p in data.get("gaps", [])][:3],
     }
 
     # Явне поле stats у JSON має пріоритет; інакше — числа останнього collect.

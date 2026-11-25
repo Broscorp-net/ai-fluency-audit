@@ -58,15 +58,22 @@ def _change_pill(ch: dict | None) -> str:
 
 def _freq_row(ind, s: dict, t: dict, color: str, ch: dict | None) -> str:
     n, total = t["sample_size"], t["exchanges_total"]
-    d = s["dialogs"]
-    pct = _pct(d, n)
+    d, a = s["dialogs"], indicators.denominator(t, ind.code)
+    pct = _pct(d, a) if a else 0
     tag = f' <span class="tag">{_e(ind.note)}</span>' if ind.note else ""
-    cls = "freq-row" + (" zero" if d == 0 and not ind.quiet else "") + (" quiet" if d == 0 and ind.quiet else "")
+    if ind.origin == "broscorp":
+        tag += ' <span class="tag">гайд Broscorp</span>'
+    gap = d == 0 and a and not ind.quiet  # нуль там, де поведінку варто було очікувати
+    cls = "freq-row" + (" zero" if gap else "") + (" quiet" if d == 0 and not gap else "")
     if d:
-        num = f"<b>{d}</b> з {n} · {pct}%"
+        num = f"<b>{d}</b> з {a} · {pct}%"
+    elif not a:
+        num = "не було доречних діалогів"
     else:
         num = "не було нагоди або йде поза чатом" if ind.quiet else "не помічено"
     meta = []  # кожен елемент уже безпечний для вставки в HTML
+    if indicators.method(t) == indicators.METHOD:
+        meta.append(_e(indicators.scope(ind.code)))
     if d:
         if total > n:
             meta.append(_e(f"≈ {indicators.estimate(t, ind.code)} за період"))
@@ -85,12 +92,20 @@ def _freq_row(ind, s: dict, t: dict, color: str, ch: dict | None) -> str:
       </div>"""
 
 
+def _kinds_text(t: dict) -> str:
+    kinds = t.get("types") if indicators.method(t) == indicators.METHOD else None
+    if not isinstance(kinds, dict):
+        return ""
+    return (f" (нових задач: {_e(kinds.get(indicators.NEW, 0))}, продовжень: {_e(kinds.get(indicators.FOLLOW, 0))}, "
+            f"швидких питань: {_e(kinds.get(indicators.QUICK, 0))})")
+
+
 def _freq_html(t: dict, changes: dict) -> str:
     cov = indicators.coverage(t)
     n, total = t["sample_size"], t["exchanges_total"]
     summary = (
-        f"У вибірці <b>{_e(n)}</b> діалогів із {_e(total)} за період. Показано хоч в одному діалозі: "
-        f"<b>{cov['shown']} з {len(indicators.CATALOG)}</b> індикаторів; жодного разу не помічено: {cov['absent']} "
+        f"У вибірці <b>{_e(n)}</b> діалогів із {_e(total)} за період{_kinds_text(t)}. Показано хоч в одному діалозі: "
+        f"<b>{cov['shown']} з {cov['total']}</b> індикаторів; жодного разу не помічено: {cov['absent']} "
         f"(з них ситуативних чи рідко видних: {cov['absent_quiet']})."
         + (f' <span class="flag">🔴 Тривожних слідів: {cov["flags"]}</span>.' if cov["flags"] else "")
     )
@@ -105,8 +120,9 @@ def _freq_html(t: dict, changes: dict) -> str:
       <div class="freq-title">{ICONS[key]} {LABELS[key]} <small>{UA_LABELS[key]}</small></div>{rows}
     </div>"""
     note = (
-        "Частота = діалоги з цією поведінкою / діалоги вибірки. Оцінок немає: звіт показує, як часто поведінка "
-        "зустрілася, а не наскільки це «добре». Нуль біля ситуативної чи рідко видної поведінки — не прогалина. "
+        "Частота рахується від доречних діалогів: мету чи контекст чекаємо в нових задачах, перевірку й уточнення — "
+        "у продовженнях, тож швидкі питання й «ок, далі» частоту не знижують. Оцінок немає: звіт показує, як часто "
+        "поведінка зустрілася, а не наскільки це «добре». Нуль біля ситуативної чи рідко видної поведінки — не прогалина. "
         + ("«За період» — оцінка (частка × усі діалоги періоду), а не точний підрахунок." if total > n else
            "Вибірка охоплює весь період, тож числа точні.")
     )
@@ -121,6 +137,14 @@ def _freq_html(t: dict, changes: dict) -> str:
 # ── прогрес ──────────────────────────────────────────────────────────────────
 
 def _progress_html(t: dict, prev_freq: dict | None, previous: dict | None, rubric_changed: bool) -> str:
+    if prev_freq and not indicators.same_method(t, prev_freq["frequency"]):
+        return f"""
+  <div class="section">
+    <div class="section-title">📈 Прогрес</div>
+    <div class="change-box"><p class="chg-note">Попередній аудит ({_e(str(prev_freq.get('date', ''))[:10])}) рахував частоти
+    від усіх діалогів, а цей — лише від доречних (мету чекаємо в нових задачах, перевірку — у продовженнях). Це різні
+    величини, тож порівняння почнеться з наступного аудиту.</p></div>
+  </div>"""
     if not prev_freq:
         if previous is not None:
             return """
@@ -175,7 +199,7 @@ def _history_html(history: list | None, limit: int = 12) -> str:
         if indicators.valid_tally(f):
             cov = indicators.coverage(f)
             rows.append(f"<tr><td>{date}</td><td>{_e(f['exchanges_total'])}</td><td>{_e(f['sample_size'])}</td>"
-                        f"<td>{cov['shown']} з {len(indicators.CATALOG)}</td><td>{cov['flags'] or '—'}</td></tr>")
+                        f"<td>{cov['shown']} з {cov['total']}</td><td>{cov['flags'] or '—'}</td></tr>")
         elif isinstance(h.get("scores"), dict):
             overall = h.get("overall")
             tail = f", загалом {_e(overall)}" if isinstance(overall, (int, float)) and not isinstance(overall, bool) else ""

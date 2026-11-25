@@ -80,8 +80,14 @@ class CliEndToEnd(unittest.TestCase):
         return out
 
     @staticmethod
-    def labels(n: int, marks: dict | None = None) -> dict:
-        return {str(i): (marks or {}).get(i, []) for i in range(1, n + 1)}
+    def labels(n: int, marks: dict | None = None, starts: set | None = None) -> dict:
+        """Розмітка як у скіла: тип діалогу (початок сесії — «нова», решта — «продовження») і коди."""
+        return {str(i): ["нова" if i in (starts or set()) else "продовження", *(marks or {}).get(i, [])]
+                for i in range(1, n + 1)}
+
+    @staticmethod
+    def starts_of(collect_out: str) -> set:
+        return {int(m) for m in re.findall(r"^--- Діалог (\d+) .*· початок сесії ---\r?$", collect_out, re.M)}
 
     def add_history(self, count: int) -> None:
         """Додає проєкт із count старими діалогами: вибірка стає досить великою для висновків про зміни."""
@@ -93,9 +99,10 @@ class CliEndToEnd(unittest.TestCase):
     def audit(self, marks: dict | None = None, narrative: dict | None = None, date: str | None = None,
               no_report: bool = False) -> tuple:
         """collect → tally → save, як це робить скіл. Повертає (вивід tally, вивід save)."""
-        n = self.stats_of(self.collect())["exchanges_in_sample"]
+        out = self.collect()
+        n = self.stats_of(out)["exchanges_in_sample"]
         dated = ["--date", date] if date else []
-        code, t_out, err = self.run_cli("tally", *dated, stdin=json.dumps(self.labels(n, marks)))
+        code, t_out, err = self.run_cli("tally", *dated, stdin=json.dumps(self.labels(n, marks, self.starts_of(out))))
         self.assertEqual((code, err), (0, ""), t_out)
         code, s_out, err = self.run_cli("save", *dated, *(["--no-report"] if no_report else []),
                                         stdin=json.dumps(narrative or {"summary": "ок"}))
@@ -107,7 +114,8 @@ class CliEndToEnd(unittest.TestCase):
 
     @staticmethod
     def row_of(markdown: str, name: str) -> str:
-        return next(r for r in markdown.splitlines() if r.startswith(f"| {name}"))
+        """Рядок повної таблиці за назвою поведінки (рядки починаються з коду: «| Del1 · …»)."""
+        return next(r for r in markdown.splitlines() if r.startswith("| ") and f"· {name}" in r.split("|")[1])
 
     # ── збір ─────────────────────────────────────────────────────────────────
 
@@ -127,6 +135,8 @@ class CliEndToEnd(unittest.TestCase):
         self.assertIn("[REDACTED:anthropic-key]", out)
         self.assertIn("[ДІЇ ШІ]: Edit", out)
         self.assertEqual(self.stats_of(out)["masked_fragments"], 1)
+        self.assertEqual(out.count("· початок сесії ---"), 2)                  # по одному на кожну сесію
+        self.assertEqual(self.starts_of(out), {1, 4})
 
     def test_skip_recent_can_be_disabled(self):
         _, out, _ = self.run_cli("collect", "--days", "30", "--skip-recent-minutes", "0")
@@ -146,6 +156,7 @@ class CliEndToEnd(unittest.TestCase):
         (d / "s1.jsonl").write_text(_session([(f"Задача {i}", 300 + i) for i in range(150)], "/work/big"), encoding="utf-8")
         _, out, _ = self.run_cli("collect", "--days", "30")
         self.assertEqual(self.stats_of(out)["exchanges_in_sample"], 100)
+        self.assertEqual(self.stats_of(out)["session_starts_in_sample"], 3)     # усі початки сесій у вибірці
 
     def test_add_exported_history(self):
         now = datetime.now(timezone.utc).timestamp()
@@ -170,7 +181,7 @@ class CliEndToEnd(unittest.TestCase):
         self.assertEqual(stats["imported_exchanges"], 2)
         self.assertEqual(stats["imported_from"], {"ChatGPT": 1, "Claude": 1})
         self.assertEqual(stats["exchanges_total"], 17)
-        self.assertIn("· сесія I1 · проєкт імпорт ChatGPT ---", out)
+        self.assertIn("· сесія I1 · проєкт імпорт ChatGPT · початок сесії ---", out)
         self.assertIn("СВІЖЕ-ПИТАННЯ", out)
         self.assertNotIn("ДАВНЄ-ПИТАННЯ", out)                               # період діє й на експорт із датами
         self.assertIn("ПИТАННЯ-З-CLAUDE-AI", out)                            # без дат — лишається
@@ -215,9 +226,11 @@ class CliEndToEnd(unittest.TestCase):
         full = self.labels(15)
         cases = [
             ({k: v for k, v in full.items() if int(k) not in (5, 6, 7)}, "5–7"),   # пропущені діалоги названо
-            ({**full, "3": ["Del9"]}, "невідомий індикатор"),
-            ({**full, "3": ["Del1!"]}, "тривожного сліду"),
-            ({**full, "99": []}, "у вибірці немає"),
+            ({**full, "3": ["продовження", "Del9"]}, "невідомий індикатор"),
+            ({**full, "3": ["продовження", "Del1!"]}, "тривожного сліду"),
+            ({**full, "99": ["нова"]}, "у вибірці немає"),
+            ({**full, "3": ["Del1"]}, "немає типу діалогу в: 3"),
+            ({**full, "3": ["нова", "питання"]}, "тип має бути один"),
         ]
         for raw, message in cases:
             with self.subTest(message=message):
@@ -228,21 +241,27 @@ class CliEndToEnd(unittest.TestCase):
         self.assertFalse((self.fl / "last-tally.json").exists())            # з поганою розміткою нічого не збережено
 
     def test_tally_counts_projects_flags_and_gives_orientation(self):
-        self.collect()
+        starts = self.starts_of(self.collect())                              # діалоги 1 і 4 — нові задачі
         marks = {1: ["Del1"], 4: ["Del1", "Des2"], 5: ["Del1"], 9: ["Dil1!"], 10: ["Dis1"]}
-        code, out, err = self.run_cli("tally", stdin=json.dumps({"labels": self.labels(15, marks)}))
+        code, out, err = self.run_cli("tally", stdin=json.dumps({"labels": self.labels(15, marks, starts)}))
         self.assertEqual((code, err), (0, ""))
         row = self.row_of(out, "Формулює мету до запиту")
-        self.assertIn("**3** з 15", row)
-        self.assertIn("20%", row)
+        # мета доречна в 2 нових задачах; ще раз її видно в продовженні №5 — воно теж у знаменнику
+        self.assertIn("**3** з 3", row)
+        self.assertIn("100%", row)
         cells = [c.strip() for c in row.strip("|").split("|")]
-        self.assertEqual(cells[4], "2")                                      # діалог 1 — secret-client, 4 і 5 — app-a
+        self.assertEqual(cells[1], "нові задачі")
+        self.assertEqual(cells[5], "2")                                      # діалог 1 — secret-client, 4 і 5 — app-a
+        self.assertIn("**1** з 13", self.row_of(out, "Перевіряє факти й твердження, які мають значення"))
         self.assertIn("Тривожних слідів 🔴: **1**", out)
-        orientation = out.split("=== ОРІЄНТИРИ")[1]
-        self.assertIn("Жодного разу не помічено:", orientation)
-        self.assertIn("Del2 —", orientation)
-        self.assertIn("Тривожні сліди 🔴: Dil1", orientation)
-        self.assertIn("Попередній аудит із частотами: немає", orientation)
+        summary = out.split("=== КОРОТКИЙ ПІДСУМОК")[1].split("=== ПОВНА ТАБЛИЦЯ")[0]
+        self.assertIn("(нових задач: 2, продовжень: 13, швидких питань: 0)", summary)
+        self.assertIn("Формулює мету до запиту — **3** з 3 (100%) у нових задачах", summary)
+        self.assertIn("**⚠️ Рідко або ніколи**", summary)
+        self.assertIn("**🔴 Тривожні сліди: 1** — у темах «Зважає, якою інформацією ділиться з ШІ»", summary)
+        self.assertIn("це перший аудит із частотами", summary)
+        self.assertNotIn("|", summary)                                       # у чат — без таблиць
+        self.assertLessEqual(len(summary.strip().splitlines()), 18)
         self.assertNotIn("Було → зміна", out)
 
     def test_save_requires_a_tally_and_consumes_it(self):
@@ -299,8 +318,12 @@ class CliEndToEnd(unittest.TestCase):
         self.assertIn("Джерело &amp; Ко</a>", page)
         self.assertIn("Доповнення", page)
         self.assertIn("Частота поведінки", page)
-        self.assertIn("<b>3</b> з 15 · 20%", page)                            # Del1
+        self.assertIn("<b>3</b> з 3 · 100%", page)                            # Del1: 2 нові задачі + продовження №5
+        self.assertIn("у нових задачах", page)
+        self.assertIn("(нових задач: 2, продовжень: 13, швидких питань: 0)", page)
         self.assertIn("🔴 тривожних слідів: 1", page)
+        self.assertIn("Дає контекст: що, навіщо й потрібні матеріали", page)  # доповнення Broscorp є у звіті
+        self.assertEqual(page.count('<span class="tag">гайд Broscorp</span>'), 3)
         for gone in ("Score", "score-card", "overall"):                      # балів у звіті немає
             self.assertNotIn(gone, page)
         self.assertNotIn("Прогрес", page)                                    # перший аудит — порівнювати ні з чим
@@ -316,19 +339,21 @@ class CliEndToEnd(unittest.TestCase):
         self.assertIn("не було нагоди або йде поза чатом", page)
 
     def test_progress_marks_only_changes_beyond_noise(self):
-        self.add_history(40)                                                 # вибірка 55: досить для висновків
-        self.audit({i: ["Del1"] for i in range(1, 6)})                       # 5 з 55
-        t_out, _ = self.audit({i: ["Del1"] for i in range(1, 31)})           # 30 з 55: +45 п.п.
+        self.add_history(40)                     # вибірка 55: 3 початки сесій (№1, 41, 44) і 52 продовження
+        check = "Перевіряє факти й твердження, які мають значення"
+        self.audit({i: ["Dis1"] for i in range(2, 7)})                       # 5 з 52 продовжень
+        t_out, _ = self.audit({i: ["Dis1"] for i in range(2, 32)})           # 30 з 52: +48 п.п.
         self.assertIn("Було → зміна", t_out)
-        self.assertIn("5 з 55 (9%) · ▲ +45 п.п. · помітна зміна", self.row_of(t_out, "Формулює мету до запиту"))
-        self.assertIn("Попередній аудит із частотами: 20", t_out)
+        self.assertIn("5 з 52 (10%) · ▲ +48 п.п. · помітна зміна", self.row_of(t_out, check))
+        self.assertIn("**📈 Помітні зміни з 20", t_out)                     # дата попереднього аудиту
         page = self.newest_report()
         self.assertIn("Прогрес", page)
         self.assertIn("Помітні зміни частоти", page)
-        self.assertIn("▲ +45 п.п. · помітна зміна", page)
+        self.assertIn("▲ +48 п.п. · помітна зміна", page)
 
-        t_out, _ = self.audit({i: ["Del1"] for i in range(1, 34)})           # 33 з 55: +5 п.п. — похибка
-        self.assertIn("у межах похибки", self.row_of(t_out, "Формулює мету до запиту"))
+        t_out, _ = self.audit({i: ["Dis1"] for i in range(2, 35)})           # 33 з 52: +6 п.п. — похибка
+        self.assertIn("у межах похибки", self.row_of(t_out, check))
+        self.assertIn("помітних змін немає", t_out)
         body = self.newest_report().split("</style>")[1]
         self.assertIn("Помітних змін частоти порівняно з попереднім аудитом немає", body)
         self.assertNotIn("pill-up", body)
@@ -348,7 +373,7 @@ class CliEndToEnd(unittest.TestCase):
         junk = [legacy, "сміття", {"date": "2026-10-02", "scores": {"delegation": "x"}}]
         (self.fl / "history.json").write_text(json.dumps(junk, ensure_ascii=False), encoding="utf-8")
         t_out, _ = self.audit({1: ["Del1"]})
-        self.assertIn("Раніші аудити були за балами", t_out)
+        self.assertIn("раніші аудити були за балами", t_out)
         self.assertNotIn("Було → зміна", t_out)                              # порівнювати частоти з балами не можна
         page = self.newest_report()
         self.assertIn("Попередні аудити були за балами", page)
@@ -364,7 +389,7 @@ class CliEndToEnd(unittest.TestCase):
         self.assertTrue(hist[0]["date"].startswith("2020-01-15"))
         self.assertEqual((hist[0]["dialogs"], hist[1]["dialogs"]), ({"Des2": 1}, {"Del1": 1}))
         self.assertEqual(json.loads(self.run_cli("last")[1])["frequency"]["indicators"]["Del1"]["dialogs"], 1)
-        self.assertIn("Попередній аудит із частотами: немає", t_out)         # раніше 2020 нічого не було
+        self.assertIn("це перший аудит із частотами", t_out)                # раніше 2020 нічого не було
         page = self.newest_report()
         self.assertNotIn("Прогрес", page)
         self.assertEqual(page.count("<tr><td>20"), 1)                        # звіт за минуле не показує майбутніх аудитів
@@ -374,6 +399,40 @@ class CliEndToEnd(unittest.TestCase):
         code, _, err = self.run_cli("save", "--date", "15.01.2020", stdin=json.dumps({"summary": "x"}))
         self.assertEqual(code, 2)
         self.assertIn("--date", err)
+
+    def test_audit_saved_before_broscorp_indicators_still_compares(self):
+        self.fl.mkdir(parents=True)
+        codes = [c.code for c in indicators.CATALOG if c.origin == "anthropic"]
+        old = {"date": "2026-10-14 12:00", "rubric": 3, "exchanges": 15, "frequency": {
+            "sample_size": 15, "exchanges_total": 15,
+            "indicators": {c: {"dialogs": 0, "flags": 0, "projects": 0} for c in codes}}}
+        (self.fl / "history.json").write_text(json.dumps([old]), encoding="utf-8")
+        t_out, _ = self.audit({1: ["Del1", "Des9"]})
+        self.assertIn("попередній аудит рахувався від усіх діалогів", t_out)  # інший метод — не порівнюємо
+        self.assertTrue(self.row_of(t_out, "Дає контекст: що, навіщо й потрібні матеріали").rstrip(" |").endswith("—"))
+        page = self.newest_report()
+        self.assertIn("рахував частоти", page)
+        self.assertIn("<td>0 з 24</td>", page)                              # старий аудит мірявся 24 індикаторами
+        self.assertIn("<td>2 з 27</td>", page)
+
+    def test_save_keeps_lists_short(self):
+        self.audit(narrative={"summary": "s" * 1000, "patterns": [f"п{i}" for i in range(6)],
+                              "strengths": [f"с{i}" for i in range(6)], "gaps": [f"г{i}" for i in range(6)]})
+        last = json.loads(self.run_cli("last")[1])
+        self.assertEqual([len(last[k]) for k in ("patterns", "strengths", "gaps")], [3, 3, 3])
+        self.assertLessEqual(len(last["summary"]), 400)
+
+    def test_estimate_for_period_accounts_for_sample_weights(self):
+        self.add_history(150)                    # 165 діалогів: 3 початки сесій і 162 продовження, вибірка 100
+        out = self.collect()
+        starts = self.starts_of(out)
+        self.assertEqual(len(starts), 3)
+        n = self.stats_of(out)["exchanges_in_sample"]
+        marks = {i: ["Dis1"] for i in range(1, n + 1) if i not in starts}  # перевірка в кожному продовженні
+        code, t_out, err = self.run_cli("tally", stdin=json.dumps(self.labels(n, marks, starts)))
+        self.assertEqual((code, err), (0, ""))
+        row = self.row_of(t_out, "Перевіряє факти й твердження, які мають значення")
+        self.assertIn("**97** з 97 | 100% | ≈ 162 |", row)                  # не 97 і не 165: саме 162 продовження
 
     def test_stats_rules(self):
         self.audit()
@@ -464,7 +523,7 @@ class SkillPackage(unittest.TestCase):
         # усе, на що посилається SKILL.md через ${CLAUDE_SKILL_DIR}, існує
         refs = re.findall(r"\$\{CLAUDE_SKILL_DIR\}/([\w./-]+)", text)
         for needed in ("scripts/fluency.py", "references/rubric-4d.md", "references/report-template.md",
-                       "references/tips.md"):
+                       "references/tips.md", "references/broscorp-indicators.md", "references/dialog-types.md"):
             self.assertIn(needed, refs)
         for ref in refs:
             self.assertTrue((SKILL / ref).exists(), ref)
@@ -478,28 +537,42 @@ class SkillPackage(unittest.TestCase):
         self.assertIn("Оцінок 1–10 немає", text)
 
     def test_catalog_matches_rubric_and_tips(self):
-        rubric = (SKILL / "references" / "rubric-4d.md").read_text(encoding="utf-8")
-        tips = (SKILL / "references" / "tips.md").read_text(encoding="utf-8")
+        refs = SKILL / "references"
+        rubric = (refs / "rubric-4d.md").read_text(encoding="utf-8")
+        extra = (refs / "broscorp-indicators.md").read_text(encoding="utf-8")
+        extra_defs, extra_tips = extra.split("## Поради")
+        tips = (refs / "tips.md").read_text(encoding="utf-8") + extra_tips
         for d in ("Delegation", "Description", "Discernment", "Diligence"):
             self.assertIn(d, rubric)
-        blocks = re.split(r"^\*\*(?=(?:Del|Des|Dis|Dil)\d\. )", rubric, flags=re.M)[1:]
         parsed = {}
-        for block in blocks:
-            m = re.match(r"((?:Del|Des|Dis|Dil)\d)\. (.+?)\*\*(.*)", block)
-            parsed[m.group(1)] = (m.group(2).strip(), m.group(3), block)
+        for text in (rubric, extra_defs):
+            for block in re.split(r"^\*\*(?=(?:Del|Des|Dis|Dil)\d\. )", text, flags=re.M)[1:]:
+                m = re.match(r"((?:Del|Des|Dis|Dil)\d)\. (.+?)\*\*(.*)", block)
+                self.assertNotIn(m.group(1), parsed, f"{m.group(1)} визначено двічі")
+                parsed[m.group(1)] = (m.group(2).strip(), m.group(3), block)
         self.assertEqual(set(parsed), {c.code for c in indicators.CATALOG})
         for c in indicators.CATALOG:
             name, marks, block = parsed[c.code]
-            self.assertEqual(name, c.name, f"{c.code}: назва в каталозі й у рубриці різна")
+            self.assertEqual(name, c.name, f"{c.code}: назва в каталозі й у визначенні різна")
             note = ("ситуативний" if "ситуативний" in marks else "рідко видно" if "рідко" in marks
                     else "видно частково" if "частково" in marks else "")
-            self.assertEqual(c.note, note, f"{c.code}: позначка видимості розійшлася з рубрикою")
-            self.assertEqual(c.flag, "Тривожний слід" in block, f"{c.code}: тривожний слід у каталозі й рубриці різний")
-            self.assertIn(f"**{c.code}. ", tips, f"{c.code}: немає порад у tips.md")      # до кожного є поради з джерел
+            self.assertEqual(c.note, note, f"{c.code}: позначка видимості розійшлася з визначенням")
+            self.assertEqual(c.flag, "Тривожний слід" in block, f"{c.code}: тривожний слід у каталозі й визначенні різний")
+            self.assertIn(f"**{c.code}. ", tips, f"{c.code}: немає порад")                  # до кожного є поради з джерел
+            defined_in_extra = re.search(rf"^\*\*{c.code}\. ", extra_defs, re.M) is not None
+            self.assertEqual(defined_in_extra, c.origin == "broscorp", f"{c.code}: визначення не в тому файлі")
+
+    def test_dialog_types_doc_matches_code(self):
+        doc = (SKILL / "references" / "dialog-types.md").read_text(encoding="utf-8")
+        rows = {m.group(1): m.group(2) for m in re.finditer(r"^\| ((?:Del|Des|Dis|Dil)\d) · [^|]+\|(.+)\|$", doc, re.M)}
+        self.assertEqual(set(rows), {c.code for c in indicators.CATALOG})
+        for c in indicators.CATALOG:
+            marks = [cell.strip() == "✓" for cell in rows[c.code].split("|")]
+            self.assertEqual({t for t, on in zip(indicators.TYPES, marks) if on}, set(c.applies), c.code)
 
     def test_template_has_no_scores_and_asks_for_frequency_flow(self):
         template = (SKILL / "references" / "report-template.md").read_text(encoding="utf-8")
-        for needle in ("Частота поведінки", "Динаміка", "шаблон промпту", "tally"):
+        for needle in ("tally", "шаблон промпту", "до ~30 рядків", "HTML"):
             self.assertIn(needle.lower(), template.lower())
         for gone in ("Scorecard", "Бал (1–10)", "Загалом: X.X"):
             self.assertNotIn(gone, template)
